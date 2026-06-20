@@ -1,0 +1,56 @@
+{:paths ["src" "resources"]
+
+ :deps
+ {org.clojure/clojure   {:mvn/version "1.12.1"}
+  integrant/integrant   {:mvn/version "0.13.1"}
+  ;; cljfx pins an early-access JavaFX 22; exclude it so we control the JavaFX
+  ;; version ourselves and avoid two JavaFX versions on the classpath.
+  cljfx/cljfx           {:mvn/version "1.9.5"
+                         :exclusions  [org.openjfx/javafx-base
+                                       org.openjfx/javafx-graphics
+                                       org.openjfx/javafx-controls
+                                       org.openjfx/javafx-media
+                                       org.openjfx/javafx-web]}
+  ;; JDK 25 no longer bundles JavaFX, so bring it in explicitly with the linux
+  ;; x86_64 classifier. controls -> graphics -> base transitively.
+  org.openjfx/javafx-controls$linux {:mvn/version "25"}}
+
+ :aliases
+ {;; Run the desktop app.
+  :run
+  {:main-opts ["-m" "dapr.main"]}
+
+  ;; REPL-driven development with integrant.repl (go / reset / halt).
+  :dev
+  {:extra-paths ["dev/src" "test"]
+   :extra-deps  {integrant/repl {:mvn/version "0.4.0"}}}
+
+  ;; Unit + integration tests. jimfs provides a real in-memory java.nio
+  ;; FileSystem so the sync engine is exercised over the same NIO API that
+  ;; MTP uses — no mocks, no hardware.
+  :test
+  {:extra-paths ["test"]
+   :extra-deps  {io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}
+                 com.google.jimfs/jimfs               {:mvn/version "1.3.0"}}
+   :main-opts   ["-m" "cognitect.test-runner"]
+   :exec-fn     cognitect.test-runner.api/test}
+
+  ;; Formatting.
+  :cljfmt
+  {:extra-paths ["dev/src" "test"]
+   :extra-deps  {dev.weavejester/cljfmt {:mvn/version "0.13.1"}}
+   :main-opts   ["-m" "cljfmt.main"]}
+
+  ;; Linting.
+  :clj-kondo
+  {:extra-paths ["dev/src" "test"]
+   :extra-deps  {clj-kondo/clj-kondo {:mvn/version "2025.04.07"}}
+   :main-opts   ["-m" "clj-kondo.main"]}
+
+  ;; Optional MTP support. Requires a built melt-jfs jar (./gradlew jar in the
+  ;; melt-jfs checkout) and native libmtp/WPD access. Kept off the default
+  ;; classpath so dev/test/CI never need the native dependency.
+  :mtp
+  {:extra-deps {org.meltzg/melt-jfs
+                {:local/root "../melt-jfs/build/libs/melt-jfs.jar"}}
+   :jvm-opts   ["--enable-native-access=ALL-UNNAMED"]}}}
