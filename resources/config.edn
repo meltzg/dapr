@@ -1,0 +1,3 @@
+{:dapr/store    {}
+ :dapr/state    {:store #ig/ref :dapr/store}
+ :dapr/renderer {:state-atom #ig/ref :dapr/state}}

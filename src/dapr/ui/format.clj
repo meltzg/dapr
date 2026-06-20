@@ -1,0 +1,80 @@
+(ns dapr.ui.format
+  "Pure presentation helpers for the UI: human-readable formatting and derived
+  predicates over the application state. No side effects and no JavaFX, so this
+  logic is unit-testable in isolation (dapr.ui.views handles the rendering).")
+
+(defn human-bytes
+  "Format a byte count as a short human-readable string."
+  [n]
+  (let [n (or n 0)]
+    (cond
+      (< n 1024)               (str n " B")
+      (< n (* 1024 1024))      (format "%.1f KB" (/ (double n) 1024))
+      (< n (* 1024 1024 1024)) (format "%.1f MB" (/ (double n) (* 1024 1024)))
+      :else                    (format "%.2f GB" (/ (double n) (* 1024 1024 1024))))))
+
+(defn status-text
+  "Human-readable label for a status keyword."
+  [status]
+  (case status
+    :idle     "Idle"
+    :scanning "Scanning…"
+    :planned  "Plan ready"
+    :syncing  "Syncing…"
+    :done     "Done"
+    :error    "Error"
+    (str status)))
+
+(defn busy?
+  "True while a scan or sync is in progress."
+  [status]
+  (contains? #{:scanning :syncing} status))
+
+(defn capacity-text
+  "Render a capacity map (see dapr.domain.capacity/usage) as used / budget."
+  [{:keys [used budget]}]
+  (format "%s / %s" (human-bytes used) (human-bytes budget)))
+
+(defn capacity-fraction
+  "Fill fraction (0.0–1.0) for the capacity meter."
+  [{:keys [used budget]}]
+  (if (and budget (pos? budget))
+    (min 1.0 (/ (double used) budget))
+    0.0))
+
+(defn over-capacity?
+  [{:keys [used budget]}]
+  (boolean (and used budget (> used budget))))
+
+(defn track-row-label
+  "Label for one track row: name, size, and where it currently lives on the
+  sink (if anywhere)."
+  [{:keys [name size]} sink-track]
+  (str name
+       "  (" (human-bytes size) ")"
+       (when sink-track (str "  — on sink: " (:rel sink-track)))))
+
+(defn plan-summary-text
+  "Render a plan summary (see dapr.domain.plan/summary) as a one-liner."
+  [summary]
+  (if summary
+    (str (format "Add %d (%s) · Delete %d (%s) · Skip %d"
+                 (:add summary) (human-bytes (:bytes-added summary))
+                 (:delete summary) (human-bytes (:bytes-freed summary))
+                 (:skip summary))
+         (when (pos? (:blocked summary 0))
+           (format " · Blocked %d" (:blocked summary))))
+    "No plan yet."))
+
+(defn can-preview?
+  "True when distinct source and sink libraries are chosen and not busy."
+  [{:keys [source-id sink-id status]}]
+  (boolean (and source-id sink-id (not= source-id sink-id) (not (busy? status)))))
+
+(defn can-sync?
+  "True when a plan is ready with at least one add, move, or delete."
+  [{:keys [plan status]}]
+  (boolean (and plan (= status :planned)
+                (pos? (+ (get-in plan [:summary :add] 0)
+                         (get-in plan [:summary :move] 0)
+                         (get-in plan [:summary :delete] 0))))))
