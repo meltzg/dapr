@@ -1,0 +1,58 @@
+(ns dapr.fs.nio-integration-test
+  (:require [clojure.test :refer [deftest is testing]]
+            [dapr.fs.nio :as nio]
+            [dapr.test-fs :as tfs]))
+
+(deftest copy-and-delete-across-filesystems-test
+  (testing "copy creates parents and content across two providers; delete removes it"
+    (with-open [src-fs (tfs/unix-fs)
+                dst-fs (tfs/unix-fs)]
+      (let [src (tfs/root src-fs "/src")
+            dst (tfs/root dst-fs "/dst")]
+        (tfs/write! (.resolve src "music/song.mp3") "hello")
+        (nio/copy-file! src dst "music/song.mp3")
+        (is (= "hello" (tfs/slurp-path (.resolve dst "music/song.mp3"))))
+        (nio/delete-file! dst "music/song.mp3")
+        (is (not (tfs/exists? (.resolve dst "music/song.mp3"))))))))
+
+(deftest catalog!-test
+  (testing "scans audio files across multiple roots, tagging :root and :rel"
+    (let [d1 (tfs/temp-dir!)
+          d2 (tfs/temp-dir!)]
+      (try
+        (tfs/write! (.resolve d1 "a.mp3") "aaa")
+        (tfs/write! (.resolve d1 "cover.jpg") "img")
+        (tfs/write! (.resolve d1 "sub/b.flac") "bb")
+        (tfs/write! (.resolve d2 "c.ogg") "ccc")
+        (let [tracks (nio/catalog! [(tfs/uri-of d1) (tfs/uri-of d2)])
+              by-key (into {} (map (juxt :key identity)) tracks)]
+          (is (= #{["a.mp3" 3] ["sub/b.flac" 2] ["c.ogg" 3]} (set (keys by-key))))
+          (is (= (tfs/uri-of d1) (:root (by-key ["a.mp3" 3]))))
+          (is (= "sub/b.flac" (:rel (by-key ["sub/b.flac" 2]))))
+          (is (= (tfs/uri-of d2) (:root (by-key ["c.ogg" 3]))))
+          (testing "non-audio files are ignored"
+            (is (not (contains? by-key ["cover.jpg" 3])))))
+        (finally
+          (tfs/delete-tree! d1)
+          (tfs/delete-tree! d2))))))
+
+(deftest children!-test
+  (testing "lists immediate child names under a root"
+    (let [d (tfs/temp-dir!)]
+      (try
+        (tfs/root (.getFileSystem d) (str d "/Internal"))
+        (tfs/root (.getFileSystem d) (str d "/SD Card"))
+        (is (= #{"Internal" "SD Card"} (set (nio/children! (tfs/uri-of d)))))
+        (finally
+          (tfs/delete-tree! d))))))
+
+(deftest library-free!-test
+  (testing "dedupes roots on the same device and returns a positive total"
+    (let [d (tfs/temp-dir!)]
+      (try
+        (let [free (nio/library-free! [(tfs/uri-of d)])]
+          (is (pos? free))
+          (testing "two roots on the same device are not double counted"
+            (is (= free (nio/library-free! [(tfs/uri-of d) (tfs/uri-of d)])))))
+        (finally
+          (tfs/delete-tree! d))))))
