@@ -1,0 +1,82 @@
+(ns dapr.domain.library
+  "Pure helpers for libraries and tracks.
+
+  A *library* is {:id <string> :name <string> :roots [<uri-string> ...]} where
+  each root addresses a directory on a java.nio filesystem; supported URI
+  schemes are \"file\" and \"mtp\". A *track* is one audio file discovered under
+  a library's roots: {:key [filename size] :name :size :mtime :root :rel}. A
+  *catalog* is a map of track :key -> track. Track identity is [rel size] — the
+  path relative to its root, plus byte size, with the root deliberately excluded
+  so the same relative path matches across roots/devices (e.g. source ROOT1/foo/
+  bar.mp3 matches sink SD/foo/bar.mp3). Nothing here performs I/O."
+  (:require [clojure.string :as str])
+  (:import (java.net URI URISyntaxException)))
+
+(def supported-schemes
+  "URI schemes a library root may use."
+  #{"file" "mtp"})
+
+(def default-audio-extensions
+  "File extensions (lowercase, no dot) treated as tracks by default."
+  #{"mp3" "flac" "m4a" "aac" "ogg" "opus" "wav" "wma"})
+
+(defn scheme
+  "Lowercased URI scheme of `uri-str`, or nil if not a string or unparseable."
+  [uri-str]
+  (when (string? uri-str)
+    (try
+      (some-> (URI. ^String uri-str) (.getScheme) (str/lower-case))
+      (catch URISyntaxException _ nil))))
+
+(defn supported-scheme?
+  "True when `uri-str` uses a scheme a library root may use."
+  [uri-str]
+  (contains? supported-schemes (scheme uri-str)))
+
+(defn library-valid?
+  "True when `library` has a non-blank name and at least one root, all roots
+  using a supported scheme."
+  [{:keys [name roots]}]
+  (boolean (and (string? name)
+                (not (str/blank? name))
+                (seq roots)
+                (every? supported-scheme? roots))))
+
+(defn extension
+  "Lowercased extension of `filename` (without the dot), or nil."
+  [filename]
+  (when (string? filename)
+    (let [i (str/last-index-of filename ".")]
+      (when (and i (< i (dec (count filename))))
+        (str/lower-case (subs filename (inc i)))))))
+
+(defn audio-file?
+  "True when `filename` has an audio extension."
+  ([filename] (audio-file? filename default-audio-extensions))
+  ([filename extensions] (contains? extensions (extension filename))))
+
+(defn track-key
+  "Identity of a track: [rel size] — its root-relative path and byte size. The
+  root is excluded so the same relative path matches across roots/devices."
+  [{:keys [rel size]}]
+  [rel size])
+
+(defn catalog
+  "Index a seq of tracks by :key into a catalog map. On a key collision (two
+  roots holding the same relative path + size) the first wins."
+  [tracks]
+  (reduce (fn [acc t]
+            (let [k (track-key t)]
+              (if (contains? acc k) acc (assoc acc k t))))
+          {}
+          tracks))
+
+(defn track-total-size
+  "Total bytes of a seq of tracks (e.g. the vals of a catalog)."
+  [tracks]
+  (reduce + 0 (map :size tracks)))
+
+(defn initial-selection
+  "Keys to pre-select when a sink is chosen: every track currently on the sink."
+  [sink-catalog]
+  (set (keys sink-catalog)))
