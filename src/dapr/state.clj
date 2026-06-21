@@ -23,7 +23,7 @@
    :plan           nil    ; {:actions [...] :summary {...}}
    :settings-open? false  ; whether the library-management modal is showing
    :editor         nil    ; library being added/edited, or nil
-   :browser        nil    ; folder browser, or nil — see browser-open
+   :browser        nil    ; folder browser, or nil — see browser-choose-file/-mtp
    :status         :idle  ; :idle :scanning :planned :syncing :done :error
    :scan-gen       0      ; bumped per scan; lets a new scan supersede a running one
    :progress       nil    ; {:done n :total t}
@@ -102,39 +102,65 @@
 (defn set-editor [state editor] (assoc state :editor editor))
 (defn cancel-editor [state] (assoc state :editor nil))
 (defn editor-name [state name] (assoc-in state [:editor :name] name))
-(defn editor-pending-uri [state uri] (assoc-in state [:editor :pending-uri] uri))
 
 (defn editor-add-root
-  "Append `uri` to the library being edited (ignoring blanks/duplicates)."
+  "Append `uri` to the library being edited, ignoring blanks, duplicates, and any
+  root that would mix devices (see dapr.domain.library/root-addable?)."
   [state uri]
-  (if (str/blank? uri)
-    state
-    (update-in state [:editor :roots]
-               (fn [roots] (if (some #{uri} roots) roots (conj (vec roots) uri))))))
-
-(defn editor-add-pending
-  "Append the editor's pending URI to its roots and clear the pending field."
-  [state]
-  (-> state
-      (editor-add-root (get-in state [:editor :pending-uri]))
-      (assoc-in [:editor :pending-uri] "")))
+  (let [roots (get-in state [:editor :roots])]
+    (if (and (not (str/blank? uri))
+             (not (some #{uri} roots))
+             (lib/root-addable? roots uri))
+      (assoc-in state [:editor :roots] (conj (vec roots) uri))
+      state)))
 
 (defn editor-remove-root
   [state uri]
   (update-in state [:editor :roots] (fn [roots] (vec (remove #(= % uri) roots)))))
 
 ;; --- folder browser ----------------------------------------------------------
-;; A single list+breadcrumb browser used for both file:// and mtp:// roots. Its
-;; :cwd is the directory currently shown (nil = the top-level "places" list);
-;; :crumbs is the trail of {:label :uri} from the chosen place down to :cwd;
-;; :entries is the list of child {:name :uri :dir?} maps to display. The actual
-;; directory listing is performed by the side-effecting layer (dapr.ui.events),
-;; which sets :loading? while it runs and then calls browser-set-entries.
+;; A list+breadcrumb browser scoped to a single device. The device *type* is
+;; fixed up front when a library is created (the editor carries a :kind of :file
+;; or :mtp), so the browser opens straight into the right place: file:// drops
+;; into folder navigation (:phase :browse), while mtp:// first picks one connected
+;; device (:phase :device) and then navigates it (:phase :browse). During :browse
+;; its :cwd is the directory currently shown; for file:// a nil :cwd means the
+;; top-level local "places" list, while for mtp:// :cwd starts at the chosen
+;; device root (kept in :device). :crumbs is the trail of {:label :uri} from that
+;; root down to :cwd; :entries is the list of child {:name :uri :dir?} maps to
+;; display. The actual directory listing (and device detection) is performed by
+;; the side-effecting layer (dapr.ui.events), which sets :loading? while it runs
+;; and then calls browser-set-entries/-devices.
 
-(defn browser-open
-  "Open the folder browser at the top-level places list (entries loaded async)."
+(defn browser-choose-file
+  "Open the folder browser straight into browsing local file:// places."
   [state]
-  (assoc state :browser {:cwd nil :crumbs [] :entries [] :loading? true}))
+  (assoc state :browser {:phase :browse :kind :file :device nil :devices []
+                         :cwd nil :crumbs [] :entries [] :loading? true}))
+
+(defn browser-choose-mtp
+  "Open the folder browser at MTP device selection (devices loaded async)."
+  [state]
+  (assoc state :browser {:phase :device :kind :mtp :device nil :devices []
+                         :cwd nil :crumbs [] :entries [] :loading? true}))
+
+(defn browser-set-devices
+  "Record freshly detected MTP `devices` and clear the loading flag."
+  [state devices]
+  (-> state
+      (assoc-in [:browser :devices] (vec devices))
+      (assoc-in [:browser :loading?] false)))
+
+(defn browser-choose-device
+  "Pick MTP `device` ({:name :uri}) and start browsing at its root."
+  [state {:keys [name uri]}]
+  (-> state
+      (assoc-in [:browser :phase] :browse)
+      (assoc-in [:browser :device] {:name name :uri uri})
+      (assoc-in [:browser :cwd] uri)
+      (assoc-in [:browser :crumbs] [])
+      (assoc-in [:browser :entries] [])
+      (assoc-in [:browser :loading?] true)))
 
 (defn browser-close [state] (assoc state :browser nil))
 
@@ -156,10 +182,11 @@
       (assoc-in [:browser :loading?] true)))
 
 (defn browser-to-places
-  "Return to the top-level places list."
+  "Return to the browse root: the local places list for file://, or the chosen
+  device's root for mtp:// (whose URI is kept in :device)."
   [state]
   (-> state
-      (assoc-in [:browser :cwd] nil)
+      (assoc-in [:browser :cwd] (get-in state [:browser :device :uri]))
       (assoc-in [:browser :crumbs] [])
       (assoc-in [:browser :entries] [])
       (assoc-in [:browser :loading?] true)))

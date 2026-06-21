@@ -138,31 +138,32 @@
                                       (state/set-error (.getMessage t))
                                       (state/append-log (str "Sync failed: " (.getMessage t))))))))))
 
-(defn- browse-places!
-  "Top-level browser locations: local filesystem roots + home, followed by every
-  connected MTP device (descend into a device to see its storages). MTP discovery
-  is optional and lazy (the jar may be absent), so it is wrapped to degrade to
-  local-only on any failure."
-  []
-  (let [local (nio/local-places!)
-        mtp   (try
-                (vec (for [d ((requiring-resolve 'dapr.fs.mtp/devices!))]
-                       {:name (:name d) :uri (:uri d) :dir? true}))
-                (catch Throwable _ []))]
-    (into (vec local) mtp)))
-
-(defn- browse-to!
-  "List `uri` (or the top-level places when `uri` is nil) on a background thread
-  and store the result as the browser's entries."
-  [state-atom uri]
+(defn- load-devices!
+  "Detect connected MTP devices on a background thread and store them as the
+  browser's device list. MTP discovery is optional and lazy (the jar may be
+  absent), so it degrades to an empty list on any failure."
+  [state-atom]
   (future
-    (try
-      (let [entries (if uri (nio/dir-children! uri) (browse-places!))]
-        (swap! state-atom state/browser-set-entries entries))
-      (catch Throwable t
-        (swap! state-atom (fn [s] (-> s
-                                      (state/browser-set-entries [])
-                                      (state/append-log (str "Browse failed: " (.getMessage t))))))))))
+    (let [devices (try (vec ((requiring-resolve 'dapr.fs.mtp/devices!)))
+                       (catch Throwable _ []))]
+      (swap! state-atom state/browser-set-devices devices))))
+
+(defn- browse-load!
+  "List the browser's current directory on a background thread and store the
+  result as its entries. A nil :cwd (file:// only) lists the local places."
+  [state-atom]
+  (let [cwd (get-in @state-atom [:browser :cwd])]
+    (future
+      (try
+        (let [entries (if cwd (nio/dir-children! cwd) (nio/local-places!))]
+          (swap! state-atom state/browser-set-entries entries))
+        (catch Throwable t
+          (swap! state-atom (fn [s] (-> s
+                                        (state/browser-set-entries [])
+                                        (state/append-log (str "Browse failed: " (.getMessage t)))))))))))
+
+(def ^:private mixed-device-msg
+  "A library's roots must all live on one device — remove the existing roots first to switch device.")
 
 (defn- library-id-by-name [state-atom nm]
   (:id (first (filter #(= nm (:name %)) (:libraries @state-atom)))))
@@ -176,34 +177,44 @@
       ::settings-open  (swap! state-atom state/open-settings)
       ::settings-close (swap! state-atom state/close-settings)
 
-      ;; library manager
+      ;; library manager — the device type is chosen from the New… submenu and
+      ;; pins the new library to file:// or mtp:// (editing derives it from the
+      ;; existing roots)
       ::library-new    (swap! state-atom state/set-editor
-                              {:id (str (random-uuid)) :name "" :roots [] :pending-uri ""})
+                              {:id (str (random-uuid)) :name "" :roots []
+                               :kind (:kind event)})
       ::library-edit   (when-let [l (state/library-by-id @state-atom (:id event))]
-                         (swap! state-atom state/set-editor (assoc l :pending-uri "")))
+                         (swap! state-atom state/set-editor
+                                (assoc l :kind (some-> (first (:roots l)) lib/scheme keyword))))
       ::library-delete (do (swap! state-atom state/delete-library (:id event))
                            (persist! state-atom))
 
       ;; editor
       ::editor-name        (swap! state-atom state/editor-name (:fx/event event))
-      ::editor-pending-uri (swap! state-atom state/editor-pending-uri (:fx/event event))
-      ::editor-add-pending (swap! state-atom state/editor-add-pending)
       ::editor-remove-root (swap! state-atom state/editor-remove-root (:uri event))
 
-      ;; folder browser (used for both file:// and mtp:// roots)
-      ::editor-browse  (do (swap! state-atom state/browser-open)
-                           (browse-to! state-atom nil))
-      ::browser-enter  (let [child (:child event)]
-                         (swap! state-atom state/browser-enter child)
-                         (browse-to! state-atom (:uri child)))
-      ::browser-crumb  (do (swap! state-atom state/browser-to-crumb (:idx event))
-                           (browse-to! state-atom (get-in @state-atom [:browser :cwd])))
-      ::browser-places (do (swap! state-atom state/browser-to-places)
-                           (browse-to! state-atom nil))
+      ;; folder browser — the editor's :kind decides where it opens: file://
+      ;; navigates folders directly, mtp:// first picks one connected device
+      ::editor-browse        (case (get-in @state-atom [:editor :kind])
+                               :file (do (swap! state-atom state/browser-choose-file)
+                                         (browse-load! state-atom))
+                               :mtp  (do (swap! state-atom state/browser-choose-mtp)
+                                         (load-devices! state-atom))
+                               nil)
+      ::browser-device       (do (swap! state-atom state/browser-choose-device (:device event))
+                                 (browse-load! state-atom))
+      ::browser-enter        (do (swap! state-atom state/browser-enter (:child event))
+                                 (browse-load! state-atom))
+      ::browser-crumb        (do (swap! state-atom state/browser-to-crumb (:idx event))
+                                 (browse-load! state-atom))
+      ::browser-places       (do (swap! state-atom state/browser-to-places)
+                                 (browse-load! state-atom))
       ::browser-select (when-let [uri (get-in @state-atom [:browser :cwd])]
-                         (swap! state-atom (fn [s] (-> s
-                                                       (state/editor-add-root uri)
-                                                       (state/browser-close)))))
+                         (if (lib/root-addable? (get-in @state-atom [:editor :roots]) uri)
+                           (swap! state-atom (fn [s] (-> s
+                                                         (state/editor-add-root uri)
+                                                         (state/browser-close))))
+                           (swap! state-atom state/append-log mixed-device-msg)))
       ::browser-cancel (swap! state-atom state/browser-close)
 
       ::editor-save

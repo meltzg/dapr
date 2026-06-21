@@ -23,14 +23,40 @@
     (is (false? (lib/supported-scheme? "/plain/path")))))
 
 (deftest library-valid?-test
-  (testing "a named library with supported roots is valid"
-    (is (true? (lib/library-valid? {:name "Phone" :roots ["file:///a" "mtp://1:2:a/S"]}))))
+  (testing "a named library whose roots share one device is valid"
+    (is (true? (lib/library-valid? {:name "Music" :roots ["file:///a" "file:///b"]})))
+    (is (true? (lib/library-valid? {:name "Phone" :roots ["mtp://1:2:a/S" "mtp://1:2:a/Music"]}))))
   (testing "invalid without a name, without roots, or with a bad root"
     (is (false? (lib/library-valid? {:name "" :roots ["file:///a"]})))
     (is (false? (lib/library-valid? {:name "  " :roots ["file:///a"]})))
     (is (false? (lib/library-valid? {:name "X" :roots []})))
     (is (false? (lib/library-valid? {:name "X" :roots ["http://x"]})))
-    (is (false? (lib/library-valid? nil)))))
+    (is (false? (lib/library-valid? nil))))
+  (testing "invalid when roots mix devices"
+    (is (false? (lib/library-valid? {:name "X" :roots ["file:///a" "mtp://1:2:a/S"]})))
+    (is (false? (lib/library-valid? {:name "X" :roots ["mtp://1:2:a/S" "mtp://9:9:z/S"]})))))
+
+(deftest device-key-test
+  (testing "all file:// roots share one key, each MTP device gets its own"
+    (is (= "file" (lib/device-key "file:///music")))
+    (is (= "file" (lib/device-key "file:///other/disk")))
+    (is (= "mtp://1:2:a" (lib/device-key "mtp://1:2:a/SD/Music")))
+    (is (not= (lib/device-key "mtp://1:2:a/S") (lib/device-key "mtp://9:9:z/S"))))
+  (testing "nil for unsupported or unparseable URIs"
+    (is (nil? (lib/device-key "http://x")))
+    (is (nil? (lib/device-key nil)))))
+
+(deftest root-addable?-test
+  (testing "anything supported is addable to an empty library"
+    (is (true? (lib/root-addable? [] "file:///a")))
+    (is (true? (lib/root-addable? [] "mtp://1:2:a/S")))
+    (is (false? (lib/root-addable? [] "http://x"))))
+  (testing "only same-device roots may be added to a non-empty library"
+    (is (true? (lib/root-addable? ["file:///a"] "file:///b")))
+    (is (false? (lib/root-addable? ["file:///a"] "mtp://1:2:a/S")))
+    (is (true? (lib/root-addable? ["mtp://1:2:a/S"] "mtp://1:2:a/Music")))
+    (is (false? (lib/root-addable? ["mtp://1:2:a/S"] "mtp://9:9:z/S")))
+    (is (false? (lib/root-addable? ["mtp://1:2:a/S"] "file:///a")))))
 
 (deftest extension-test
   (testing "lowercased extension without the dot"

@@ -53,52 +53,77 @@
         (is (= #{} (:selected s)))))))
 
 (deftest editor-test
-  (testing "build, edit fields, add/remove roots, pending uri"
+  (testing "build, edit fields, add/remove roots"
     (let [s (-> state/initial-state
-                (state/set-editor {:id "x" :name "" :roots [] :pending-uri ""})
-                (state/editor-name "Phone")
+                (state/set-editor {:id "x" :name "" :roots []})
+                (state/editor-name "Music")
                 (state/editor-add-root "file:///music")
-                (state/editor-pending-uri "mtp://1:2:a/SD")
-                (state/editor-add-pending))]
-      (is (= "Phone" (get-in s [:editor :name])))
-      (is (= ["file:///music" "mtp://1:2:a/SD"] (get-in s [:editor :roots])))
-      (is (= "" (get-in s [:editor :pending-uri])))
+                (state/editor-add-root "file:///more"))]
+      (is (= "Music" (get-in s [:editor :name])))
+      (is (= ["file:///music" "file:///more"] (get-in s [:editor :roots])))
       (testing "duplicate roots are ignored"
-        (is (= ["file:///music" "mtp://1:2:a/SD"]
+        (is (= ["file:///music" "file:///more"]
                (get-in (state/editor-add-root s "file:///music") [:editor :roots]))))
+      (testing "a root on a different device is rejected"
+        (is (= ["file:///music" "file:///more"]
+               (get-in (state/editor-add-root s "mtp://1:2:a/SD") [:editor :roots]))))
       (testing "remove and cancel"
-        (is (= ["mtp://1:2:a/SD"]
+        (is (= ["file:///more"]
                (get-in (state/editor-remove-root s "file:///music") [:editor :roots])))
         (is (nil? (:editor (state/cancel-editor s))))))))
 
 (deftest browser-test
-  (testing "open starts at places (nil cwd, loading), set-entries clears loading"
-    (let [s (state/browser-open state/initial-state)]
-      (is (= {:cwd nil :crumbs [] :entries [] :loading? true} (:browser s)))
+  (testing "choosing file opens straight into browsing local places"
+    (let [s (state/browser-choose-file state/initial-state)]
+      (is (= :browse (get-in s [:browser :phase])))
+      (is (= :file (get-in s [:browser :kind])))
+      (is (nil? (get-in s [:browser :cwd])))
+      (is (true? (get-in s [:browser :loading?])))
       (let [s (state/browser-set-entries s [{:name "Music" :uri "file:///m" :dir? true}])]
         (is (false? (get-in s [:browser :loading?])))
         (is (= 1 (count (get-in s [:browser :entries])))))))
+  (testing "choosing mtp opens at device selection, then a device starts browsing"
+    (let [s (state/browser-choose-mtp state/initial-state)]
+      (is (= :device (get-in s [:browser :phase])))
+      (is (= :mtp (get-in s [:browser :kind])))
+      (is (true? (get-in s [:browser :loading?])))
+      (let [s (state/browser-set-devices s [{:id "1:2:a" :name "Phone" :uri "mtp://1:2:a/"}])]
+        (is (false? (get-in s [:browser :loading?])))
+        (is (= 1 (count (get-in s [:browser :devices]))))
+        (let [s (state/browser-choose-device s {:name "Phone" :uri "mtp://1:2:a/"})]
+          (is (= :browse (get-in s [:browser :phase])))
+          (is (= {:name "Phone" :uri "mtp://1:2:a/"} (get-in s [:browser :device])))
+          (is (= "mtp://1:2:a/" (get-in s [:browser :cwd])))
+          (is (= [] (get-in s [:browser :crumbs])))))))
   (testing "entering folders pushes crumbs and tracks cwd"
     (let [s (-> state/initial-state
-                (state/browser-open)
-                (state/browser-enter {:name "Phone / SD" :uri "mtp://1:2:a/SD"})
+                (state/browser-choose-mtp)
+                (state/browser-choose-device {:name "Phone" :uri "mtp://1:2:a/"})
+                (state/browser-enter {:name "SD" :uri "mtp://1:2:a/SD"})
                 (state/browser-enter {:name "Music" :uri "mtp://1:2:a/SD/Music"}))]
       (is (= "mtp://1:2:a/SD/Music" (get-in s [:browser :cwd])))
-      (is (= [{:label "Phone / SD" :uri "mtp://1:2:a/SD"}
+      (is (= [{:label "SD" :uri "mtp://1:2:a/SD"}
               {:label "Music" :uri "mtp://1:2:a/SD/Music"}]
              (get-in s [:browser :crumbs])))
       (is (true? (get-in s [:browser :loading?])))
       (testing "jumping to a crumb truncates deeper crumbs and resets cwd"
         (let [s (state/browser-to-crumb s 0)]
           (is (= "mtp://1:2:a/SD" (get-in s [:browser :cwd])))
-          (is (= [{:label "Phone / SD" :uri "mtp://1:2:a/SD"}]
+          (is (= [{:label "SD" :uri "mtp://1:2:a/SD"}]
                  (get-in s [:browser :crumbs])))))
-      (testing "returning to places clears cwd and crumbs"
+      (testing "returning to places resets to the device root for mtp://"
         (let [s (state/browser-to-places s)]
-          (is (nil? (get-in s [:browser :cwd])))
+          (is (= "mtp://1:2:a/" (get-in s [:browser :cwd])))
           (is (= [] (get-in s [:browser :crumbs])))))
       (testing "close removes the browser entirely"
-        (is (nil? (:browser (state/browser-close s))))))))
+        (is (nil? (:browser (state/browser-close s)))))))
+  (testing "returning to places clears cwd for file://"
+    (let [s (-> state/initial-state
+                (state/browser-choose-file)
+                (state/browser-enter {:name "Music" :uri "file:///m/Music"})
+                (state/browser-to-places))]
+      (is (nil? (get-in s [:browser :cwd])))
+      (is (= [] (get-in s [:browser :crumbs]))))))
 
 (deftest set-plan-test
   (testing "records the plan and moves to :planned"

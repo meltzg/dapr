@@ -1,6 +1,6 @@
 (ns dapr.fs.mtp
   "MTP device enumeration via melt-jfs. This is the ONLY namespace that touches
-  melt-jfs classes; it is loaded lazily (see dapr.ui.events/browse-places!) so
+  melt-jfs classes; it is loaded lazily (see dapr.ui.events/load-devices!) so
   tests and lint never have to reach the native libraries.
 
   Device discovery needs native libmtp/WPD access at runtime, enabled by the JVM

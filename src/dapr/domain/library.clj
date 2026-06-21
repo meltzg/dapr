@@ -33,14 +33,41 @@
   [uri-str]
   (contains? supported-schemes (scheme uri-str)))
 
+(defn device-key
+  "Key identifying the device a root lives on, used to keep one library's roots on
+  a single device. All file:// roots share the key \"file\" (the local machine);
+  each MTP device gets its own key \"mtp://<id>\" from the URI authority. Returns
+  nil for an unparseable/unsupported URI."
+  [uri-str]
+  (case (scheme uri-str)
+    "file" "file"
+    "mtp"  (try (str "mtp://" (.getAuthority (URI. ^String uri-str)))
+                (catch URISyntaxException _ nil))
+    nil))
+
+(defn roots-device-key
+  "The device-key shared by `roots`, or nil when there are none. Roots are kept to
+  one device (see root-addable?), so a consistent set has exactly one such key."
+  [roots]
+  (some-> (seq roots) first device-key))
+
+(defn root-addable?
+  "True when `uri` may be added alongside `roots`: it must use a supported scheme
+  and live on the same device as the roots already present."
+  [roots uri]
+  (and (supported-scheme? uri)
+       (let [existing (roots-device-key roots)]
+         (or (nil? existing) (= existing (device-key uri))))))
+
 (defn library-valid?
-  "True when `library` has a non-blank name and at least one root, all roots
-  using a supported scheme."
+  "True when `library` has a non-blank name and at least one root, all roots using
+  a supported scheme and living on a single device."
   [{:keys [name roots]}]
   (boolean (and (string? name)
                 (not (str/blank? name))
                 (seq roots)
-                (every? supported-scheme? roots))))
+                (every? supported-scheme? roots)
+                (apply = (map device-key roots)))))
 
 (defn extension
   "Lowercased extension of `filename` (without the dot), or nil."
