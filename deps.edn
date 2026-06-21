@@ -3,6 +3,10 @@
  :deps
  {org.clojure/clojure   {:mvn/version "1.12.1"}
   integrant/integrant   {:mvn/version "0.13.1"}
+  ;; MTP device support via melt-jfs (Maven Central). Needs native libmtp/WPD
+  ;; access at runtime, enabled by --enable-native-access=ALL-UNNAMED in the
+  ;; :run and :dev aliases.
+  io.github.meltzg/melt-jfs {:mvn/version "0.1.1"}
   ;; cljfx pins an early-access JavaFX 22; exclude it so we control the JavaFX
   ;; version ourselves and avoid two JavaFX versions on the classpath.
   cljfx/cljfx           {:mvn/version "1.9.5"
@@ -18,12 +22,14 @@
  :aliases
  {;; Run the desktop app.
   :run
-  {:main-opts ["-m" "dapr.main"]}
+  {:main-opts ["-m" "dapr.main"]
+   :jvm-opts  ["--enable-native-access=ALL-UNNAMED"]}
 
   ;; REPL-driven development with integrant.repl (go / reset / halt).
   :dev
   {:extra-paths ["dev/src" "test"]
-   :extra-deps  {integrant/repl {:mvn/version "0.4.0"}}}
+   :extra-deps  {integrant/repl {:mvn/version "0.4.0"}}
+   :jvm-opts    ["--enable-native-access=ALL-UNNAMED"]}
 
   ;; Unit + integration tests. jimfs provides a real in-memory java.nio
   ;; FileSystem so the sync engine is exercised over the same NIO API that
@@ -45,12 +51,4 @@
   :clj-kondo
   {:extra-paths ["dev/src" "test"]
    :extra-deps  {clj-kondo/clj-kondo {:mvn/version "2025.04.07"}}
-   :main-opts   ["-m" "clj-kondo.main"]}
-
-  ;; Optional MTP support. Requires a built melt-jfs jar (./gradlew jar in the
-  ;; melt-jfs checkout) and native libmtp/WPD access. Kept off the default
-  ;; classpath so dev/test/CI never need the native dependency.
-  :mtp
-  {:extra-deps {org.meltzg/melt-jfs
-                {:local/root "../melt-jfs/build/libs/melt-jfs.jar"}}
-   :jvm-opts   ["--enable-native-access=ALL-UNNAMED"]}}}
+   :main-opts   ["-m" "clj-kondo.main"]}}}

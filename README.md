@@ -144,10 +144,12 @@ clojure -M:mtp:run
 
 The `:mtp` alias points `:local/root` at `../melt-jfs/build/libs/melt-jfs.jar`
 (adjust the path in `deps.edn` if your checkout lives elsewhere) and adds
-`--enable-native-access=ALL-UNNAMED`. In the library editor, **Detect MTP** lists
-each connected device's storages as candidate roots; file copy/move/delete and
-capacity queries against `mtp://` URIs flow through the generic `dapr.fs.nio`
-code.
+`--enable-native-access=ALL-UNNAMED`. In the library editor, **Browse…** opens a
+folder browser (the same list+breadcrumb view used for local `file://` roots)
+whose top level lists local drives, your home directory, and each connected MTP
+device's storages — descend into any folder and pick it as a root. File
+copy/move/delete and capacity queries against `mtp://` URIs flow through the
+generic `dapr.fs.nio` code.
 
 > Note: tools.deps git deps don't work for melt-jfs — it's a Java/Gradle project
 > and tools.deps does not compile Java sources, so a built artifact is required.

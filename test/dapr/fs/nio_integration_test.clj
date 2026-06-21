@@ -32,17 +32,50 @@
           (is (= (tfs/uri-of d2) (:root (by-key ["c.ogg" 3]))))
           (testing "non-audio files are ignored"
             (is (not (contains? by-key ["cover.jpg" 3])))))
+        (testing "on-scan emits a :file event once per scanned audio file"
+          (let [files  (atom [])
+                dirs   (atom [])
+                tracks (nio/catalog! [(tfs/uri-of d1) (tfs/uri-of d2)]
+                                     (fn [{:keys [type rel track]}]
+                                       (case type
+                                         :file (swap! files conj (:key track))
+                                         :dir  (swap! dirs conj rel)
+                                         nil)))]
+            (is (= (set (map :key tracks)) (set @files)))
+            (is (= (count tracks) (count @files)))
+            (testing "and a :dir event for each directory entered, including the root and subdirs"
+              (is (some #{""} @dirs))
+              (is (some #{"sub"} @dirs)))))
         (finally
           (tfs/delete-tree! d1)
           (tfs/delete-tree! d2))))))
 
-(deftest children!-test
-  (testing "lists immediate child names under a root"
+(deftest walk-abort-propagates-test
+  (testing "on-scan throwing :dapr/abort unwinds the walk (not swallowed as a dir error)"
+    (let [d (tfs/temp-dir!)]
+      (try
+        (tfs/write! (.resolve d "sub/b.mp3") "b")
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (nio/catalog! [(tfs/uri-of d)]
+                                   (fn [{:keys [type]}]
+                                     (when (= :file type)
+                                       (throw (ex-info "stop" {:dapr/abort true})))))))
+        (finally
+          (tfs/delete-tree! d))))))
+
+(deftest dir-children!-test
+  (testing "lists immediate sub-directories with round-trippable URIs, skips files"
     (let [d (tfs/temp-dir!)]
       (try
         (tfs/root (.getFileSystem d) (str d "/Internal"))
         (tfs/root (.getFileSystem d) (str d "/SD Card"))
-        (is (= #{"Internal" "SD Card"} (set (nio/children! (tfs/uri-of d)))))
+        (tfs/write! (.resolve d "loose.mp3") "x")
+        (let [entries (nio/dir-children! (tfs/uri-of d))]
+          (is (= ["Internal" "SD Card"] (mapv :name entries)))
+          (is (every? :dir? entries))
+          (testing "child URIs resolve back to the same path (so descent works)"
+            (is (= #{(.resolve d "Internal") (.resolve d "SD Card")}
+                   (set (map #(nio/root-path! (:uri %)) entries))))))
         (finally
           (tfs/delete-tree! d))))))
 
