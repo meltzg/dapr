@@ -71,6 +71,35 @@
                (get-in (state/editor-remove-root s "file:///music") [:editor :roots])))
         (is (nil? (:editor (state/cancel-editor s))))))))
 
+(deftest browser-test
+  (testing "open starts at places (nil cwd, loading), set-entries clears loading"
+    (let [s (state/browser-open state/initial-state)]
+      (is (= {:cwd nil :crumbs [] :entries [] :loading? true} (:browser s)))
+      (let [s (state/browser-set-entries s [{:name "Music" :uri "file:///m" :dir? true}])]
+        (is (false? (get-in s [:browser :loading?])))
+        (is (= 1 (count (get-in s [:browser :entries])))))))
+  (testing "entering folders pushes crumbs and tracks cwd"
+    (let [s (-> state/initial-state
+                (state/browser-open)
+                (state/browser-enter {:name "Phone / SD" :uri "mtp://1:2:a/SD"})
+                (state/browser-enter {:name "Music" :uri "mtp://1:2:a/SD/Music"}))]
+      (is (= "mtp://1:2:a/SD/Music" (get-in s [:browser :cwd])))
+      (is (= [{:label "Phone / SD" :uri "mtp://1:2:a/SD"}
+              {:label "Music" :uri "mtp://1:2:a/SD/Music"}]
+             (get-in s [:browser :crumbs])))
+      (is (true? (get-in s [:browser :loading?])))
+      (testing "jumping to a crumb truncates deeper crumbs and resets cwd"
+        (let [s (state/browser-to-crumb s 0)]
+          (is (= "mtp://1:2:a/SD" (get-in s [:browser :cwd])))
+          (is (= [{:label "Phone / SD" :uri "mtp://1:2:a/SD"}]
+                 (get-in s [:browser :crumbs])))))
+      (testing "returning to places clears cwd and crumbs"
+        (let [s (state/browser-to-places s)]
+          (is (nil? (get-in s [:browser :cwd])))
+          (is (= [] (get-in s [:browser :crumbs])))))
+      (testing "close removes the browser entirely"
+        (is (nil? (:browser (state/browser-close s))))))))
+
 (deftest set-plan-test
   (testing "records the plan and moves to :planned"
     (let [s (state/set-plan state/initial-state [:action] {:add 1})]
@@ -81,7 +110,17 @@
   (testing "appends messages in order"
     (is (= ["a" "b"] (:log (-> state/initial-state
                                (state/append-log "a")
-                               (state/append-log "b")))))))
+                               (state/append-log "b"))))))
+  (testing "caps retained lines at max-log-lines, keeping the most recent"
+    (let [n (+ state/max-log-lines 50)
+          s (reduce (fn [s i] (state/append-log s (str i)))
+                    state/initial-state
+                    (range n))]
+      (is (= state/max-log-lines (count (:log s))))
+      (is (= (str (dec n)) (last (:log s))))
+      (is (= (str (- n state/max-log-lines)) (first (:log s))))
+      (testing ":log-appends counts every append, not just retained lines"
+        (is (= n (:log-appends s)))))))
 
 (deftest set-error-test
   (testing "records the message and moves to :error"

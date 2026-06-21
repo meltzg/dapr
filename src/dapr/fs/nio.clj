@@ -5,9 +5,10 @@
   everything here performs I/O (all fns end in !)."
   (:require [clojure.string :as str]
             [dapr.domain.library :as lib])
-  (:import (java.net URI)
+  (:import (java.io File)
+           (java.net URI)
            (java.nio.file CopyOption DirectoryStream FileStore
-                          FileSystemNotFoundException FileSystems FileVisitOption
+                          FileSystemNotFoundException FileSystems
                           Files LinkOption Path Paths StandardCopyOption)
            (java.nio.file.attribute BasicFileAttributes FileAttribute)))
 
@@ -45,38 +46,65 @@
           root
           (remove str/blank? (str/split rel-path #"/"))))
 
-(defn- regular-files
-  "Realized seq of every regular file under `root`."
-  [^Path root]
-  (with-open [^java.util.stream.Stream stream (Files/walk root (make-array FileVisitOption 0))]
-    (->> (iterator-seq (.iterator stream))
-         (filter (fn [^Path p] (Files/isRegularFile p (make-array LinkOption 0))))
-         (doall))))
-
-(defn- path->track
-  "Build a track map for file `p` under root `uri` (Path `root`)."
-  [^Path root uri ^Path p]
-  (let [^BasicFileAttributes attrs
-        (Files/readAttributes p BasicFileAttributes (make-array LinkOption 0))
-        m {:name  (str (.getFileName p))
+(defn- audio-track
+  "Build a track map for audio file `p` (Path) under root `uri` (Path `root`)
+  from the already-read `attrs`."
+  [^Path root uri ^Path p ^BasicFileAttributes attrs]
+  (let [m {:name  (str (.getFileName p))
            :size  (.size attrs)
            :mtime (.toMillis (.lastModifiedTime attrs))
            :root  uri
            :rel   (relative-key root p)}]
     (assoc m :key (lib/track-key m))))
 
+(defn- walk-audio-tracks!
+  "Depth-first walk of `root`, collecting a track map for every audio file. Opens
+  each directory's stream explicitly (rather than via Files/walkFileTree) so that
+  `on-scan` is notified *before* the per-directory listing call -- which over MTP
+  is a single blocking native round-trip -- making it possible to pinpoint a
+  directory whose listing hangs (the last :dir event before the freeze names it).
+  Reads one attribute set per entry, the same as Files/walkFileTree would.
+
+  `on-scan`, when supplied, is called with {:type :dir :rel <dir rel path>} as
+  each directory is entered and {:type :file :track <track map>} for each audio
+  file found. Entries that fail to stat, and sub-directories that fail to open,
+  are skipped (matching Files/walkFileTree's visitFileFailed=CONTINUE). If
+  `on-scan` throws an ex-info carrying :dapr/abort, the whole walk unwinds (used
+  to cancel a scan that a newer one has superseded)."
+  [^Path root uri extensions on-scan]
+  (let [acc (java.util.ArrayList.)]
+    (letfn [(walk! [^Path dir]
+              (when on-scan (on-scan {:type :dir :rel (relative-key root dir)}))
+              (with-open [^DirectoryStream stream (Files/newDirectoryStream dir)]
+                (doseq [^Path p (iterator-seq (.iterator stream))]
+                  (when-let [^BasicFileAttributes attrs
+                             (try (Files/readAttributes p BasicFileAttributes (make-array LinkOption 0))
+                                  (catch Exception _ nil))]
+                    (cond
+                      (.isDirectory attrs)
+                      ;; Skip a sub-directory that fails to open, but let an on-scan
+                      ;; abort (e.g. a superseded scan, carrying ex-data) propagate.
+                      (try (walk! p)
+                           (catch Exception e
+                             (when (:dapr/abort (ex-data e)) (throw e))))
+
+                      (and (.isRegularFile attrs)
+                           (lib/audio-file? (str (.getFileName p)) extensions))
+                      (let [track (audio-track root uri p attrs)]
+                        (.add acc track)
+                        (when on-scan (on-scan {:type :file :track track}))))))))]
+      (walk! root))
+    (vec acc)))
+
 (defn catalog!
   "Scan every `root` URI of a library and return a seq of track maps for each
-  audio file, tagged with the :root it lives under and its :rel path."
-  ([roots] (catalog! roots lib/default-audio-extensions))
-  ([roots extensions]
-   (mapcat
-    (fn [uri]
-      (let [root (root-path! uri)]
-        (->> (regular-files root)
-             (filter (fn [^Path p] (lib/audio-file? (str (.getFileName p)) extensions)))
-             (map (fn [p] (path->track root uri p))))))
-    roots)))
+  audio file, tagged with the :root it lives under and its :rel path. `on-scan`,
+  when supplied, receives per-directory and per-file scan events (see
+  walk-audio-tracks!) for progress reporting and diagnostics."
+  ([roots] (catalog! roots nil))
+  ([roots on-scan] (catalog! roots on-scan lib/default-audio-extensions))
+  ([roots on-scan extensions]
+   (mapcat (fn [uri] (walk-audio-tracks! (root-path! uri) uri extensions on-scan)) roots)))
 
 (defn copy-file!
   "Copy file `rel-path` from `src-root` to `dst-root`, creating parent
@@ -117,11 +145,30 @@
        (vals)
        (reduce + 0)))
 
-(defn children!
-  "Immediate child names directly under the root of `uri` (used to enumerate the
-  storages of an MTP device)."
+(defn dir-children!
+  "Immediate sub-directories directly under `uri`, each as
+  {:name <file-name> :uri <child-uri-string> :dir? true}, sorted by name. Only
+  directories are returned — the folder browser navigates directories, while the
+  audio files inside them are discovered later by catalog!. Works unchanged
+  across providers (file://, mtp://) since both build child URIs via Path/toUri."
   [uri]
   (let [root (root-path! uri)]
     (with-open [^DirectoryStream stream (Files/newDirectoryStream root)]
-      (mapv (fn [^Path p] (str (.getFileName p)))
-            (iterator-seq (.iterator stream))))))
+      (->> (iterator-seq (.iterator stream))
+           (filter (fn [^Path p] (Files/isDirectory p (make-array LinkOption 0))))
+           (map (fn [^Path p] {:name  (str (.getFileName p))
+                               :uri   (str (.toUri p))
+                               :dir?  true}))
+           (sort-by :name)
+           (vec)))))
+
+(defn local-places!
+  "Top-level local browsing locations: each filesystem root plus the user's home
+  directory, as {:name :uri :dir? true} entries. These seed the folder browser
+  alongside any connected MTP storages."
+  []
+  (let [home  (File. (System/getProperty "user.home"))
+        entry (fn [^File f label] {:name label :uri (str (.toURI f)) :dir? true})]
+    (-> (mapv (fn [^File r] (entry r (str "Computer " (.getPath r))))
+              (File/listRoots))
+        (conj (entry home (str "Home " (.getPath home)))))))

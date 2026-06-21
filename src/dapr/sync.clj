@@ -7,9 +7,11 @@
             [dapr.fs.nio :as nio]))
 
 (defn catalog-of!
-  "Scan a library's roots into a catalog (key -> track)."
-  [{:keys [roots]}]
-  (lib/catalog (nio/catalog! roots)))
+  "Scan a library's roots into a catalog (key -> track). When `on-scan` is
+  supplied it receives per-directory and per-file scan events as they happen."
+  ([library] (catalog-of! library nil))
+  ([{:keys [roots]} on-scan]
+   (lib/catalog (nio/catalog! roots on-scan))))
 
 (defn sink-roots!
   "Per-root free space for a sink library, in library order (placement input)."
@@ -22,13 +24,20 @@
   (nio/library-free! roots))
 
 (defn build-plan!
-  "Scan source + sink and compute the selection plan for the `selected` keys."
-  [source-lib sink-lib selected]
-  (plan/selection-plan
-   {:source-catalog (catalog-of! source-lib)
-    :sink-catalog   (catalog-of! sink-lib)
-    :selected       selected
-    :sink-roots     (sink-roots! sink-lib)}))
+  "Scan source + sink and compute the selection plan for the `selected` keys. The
+  two scans run concurrently (melt-jfs serializes per device, so this is a real
+  speedup whenever they live on different devices, and harmless otherwise). The
+  optional `on-source` / `on-sink` callbacks receive per-directory and per-file
+  scan events from the respective library's walk."
+  ([source-lib sink-lib selected] (build-plan! source-lib sink-lib selected nil))
+  ([source-lib sink-lib selected {:keys [on-source on-sink]}]
+   (let [source-fut (future (catalog-of! source-lib on-source))
+         sink-cat   (catalog-of! sink-lib on-sink)]
+     (plan/selection-plan
+      {:source-catalog @source-fut
+       :sink-catalog   sink-cat
+       :selected       selected
+       :sink-roots     (sink-roots! sink-lib)}))))
 
 (defn execute-plan!
   "Execute plan `actions` against the sink: copies and deletes flow through
