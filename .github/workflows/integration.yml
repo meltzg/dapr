@@ -1,0 +1,42 @@
+name: Integration
+
+# Integration tests against live external services (clojure -M:integration). Each
+# test's :once fixture starts its backend with Testcontainers, so the job only
+# needs Docker (present on ubuntu-latest) — no manual service setup. Tests skip
+# when Docker is unavailable.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Set up Clojure
+        uses: DeLaGuardo/setup-clojure@12.5
+        with:
+          cli: latest
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+            .cpcache
+          key: cljdeps-${{ hashFiles('deps.edn') }}
+          restore-keys: cljdeps-
+
+      - name: Run integration tests
+        run: clojure -M:integration
