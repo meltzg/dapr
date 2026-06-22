@@ -32,15 +32,25 @@
   [^URI uri]
   (.getPath uri))
 
+(def ^:dynamic *credential-lookup*
+  "Function host -> {:username :password :workgroup} (or nil) used to authenticate
+  an SMB host. Defaults to the OS keystore; rebindable so integration tests can
+  inject credentials without a running keyring daemon."
+  credentials/lookup)
+
 (defn- creds-env
-  "An smb-nio env map of credentials for `host`, looked up in the OS keystore, or
-  an empty map for guest/anonymous access (also when no credentials are stored)."
+  "An smb-nio env map of credentials for `host`, looked up via *credential-lookup*,
+  or an empty map for guest/anonymous access (also when no credentials are stored).
+  Credentials MUST use jcifs's own configuration-property keys: smb-nio threads the
+  env map straight into jcifs as a PropertyConfiguration, so plain
+  'username'/'password' keys are silently ignored (the connection then falls back to
+  anonymous and the share denies access)."
   [host]
-  (let [creds (credentials/lookup host)
+  (let [creds (*credential-lookup* host)
         env   (java.util.HashMap.)]
-    (when-let [v (:workgroup creds)] (.put env "workgroup" v))
-    (when-let [v (:username creds)] (.put env "username" v))
-    (when-let [v (:password creds)] (.put env "password" v))
+    (when-let [v (:workgroup creds)] (.put env "jcifs.smb.client.domain" v))
+    (when-let [v (:username creds)] (.put env "jcifs.smb.client.username" v))
+    (when-let [v (:password creds)] (.put env "jcifs.smb.client.password" v))
     env))
 
 ;; One FileSystem per host, reused across scans/copies. defonce so a dev reload
