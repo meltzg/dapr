@@ -120,10 +120,11 @@
 
 ;; --- folder browser ----------------------------------------------------------
 ;; A list+breadcrumb browser scoped to a single device. The device *type* is
-;; fixed up front when a library is created (the editor carries a :kind of :file
-;; or :mtp), so the browser opens straight into the right place: file:// drops
-;; into folder navigation (:phase :browse), while mtp:// first picks one connected
-;; device (:phase :device) and then navigates it (:phase :browse). During :browse
+;; fixed up front when a library is created (the editor carries a :kind of :file,
+;; :mtp or :smb), so the browser opens straight into the right place: file:// drops
+;; into folder navigation (:phase :browse); mtp:// first picks one connected
+;; device (:phase :device); smb:// first enters a share URL + optional credentials
+;; (:phase :connect); each then navigates folders (:phase :browse). During :browse
 ;; its :cwd is the directory currently shown; for file:// a nil :cwd means the
 ;; top-level local "places" list, while for mtp:// :cwd starts at the chosen
 ;; device root (kept in :device). :crumbs is the trail of {:label :uri} from that
@@ -143,6 +144,33 @@
   [state]
   (assoc state :browser {:phase :device :kind :mtp :device nil :devices []
                          :cwd nil :crumbs [] :entries [] :loading? true}))
+
+(defn browser-choose-smb
+  "Open the folder browser at the SMB connect form: the user enters the share URL
+  and optional credentials, then browses the share like an MTP device root."
+  [state]
+  (assoc state :browser {:phase :connect :kind :smb :device nil :devices []
+                         :url "smb://" :username "" :password "" :workgroup ""
+                         :cwd nil :crumbs [] :entries [] :loading? false}))
+
+(defn browser-connect-field
+  "Update one editable field (:url/:username/:password/:workgroup) of the SMB
+  connect form."
+  [state field value]
+  (assoc-in state [:browser field] value))
+
+(defn browser-connect
+  "Leave the SMB connect form and start browsing the entered share `url`, recording
+  it as the browse root (kept in :device, like a chosen MTP device) so 'Places'
+  and the breadcrumbs return to the share root."
+  [state url]
+  (-> state
+      (assoc-in [:browser :phase] :browse)
+      (assoc-in [:browser :device] {:name url :uri url})
+      (assoc-in [:browser :cwd] url)
+      (assoc-in [:browser :crumbs] [])
+      (assoc-in [:browser :entries] [])
+      (assoc-in [:browser :loading?] true)))
 
 (defn browser-set-devices
   "Record freshly detected MTP `devices` and clear the loading flag."

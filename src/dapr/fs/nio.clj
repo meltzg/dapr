@@ -4,7 +4,8 @@
   provider supplied by melt-jfs. Pure data shaping lives in dapr.domain.*;
   everything here performs I/O (all fns end in !)."
   (:require [clojure.string :as str]
-            [dapr.domain.library :as lib])
+            [dapr.domain.library :as lib]
+            [dapr.fs.smb :as smb])
   (:import (java.io File)
            (java.net URI)
            (java.nio.file CopyOption DirectoryStream FileStore
@@ -23,12 +24,19 @@
 
 (defn root-path!
   "Resolve a root URI string to the java.nio.file.Path of its directory, opening
-  a non-default filesystem (e.g. mtp://) on demand."
+  a non-default filesystem (e.g. mtp://) on demand. smb:// is delegated to
+  dapr.fs.smb, which authenticates from the OS keystore and resolves the Path on
+  its own host-keyed FileSystem — Paths/get cannot be used there because smb-nio
+  caches FileSystems under a credential-bearing authority that the credential-free
+  root URI cannot reproduce."
   ^Path [uri-str]
-  (let [uri (URI. ^String uri-str)]
-    (when-not (= "file" (str/lower-case (str (.getScheme uri))))
-      (ensure-filesystem! uri))
-    (Paths/get uri)))
+  (let [uri    (URI. ^String uri-str)
+        scheme (str/lower-case (str (.getScheme uri)))]
+    (case scheme
+      "file" (Paths/get uri)
+      "smb"  (smb/root-path! uri-str)
+      (do (ensure-filesystem! uri)
+          (Paths/get uri)))))
 
 (defn- relative-key
   "Relative path of `p` under `root`, as a string with '/' separators (so paths
@@ -156,9 +164,13 @@
     (with-open [^DirectoryStream stream (Files/newDirectoryStream root)]
       (->> (iterator-seq (.iterator stream))
            (filter (fn [^Path p] (Files/isDirectory p (make-array LinkOption 0))))
-           (map (fn [^Path p] {:name  (str (.getFileName p))
-                               :uri   (str (.toUri p))
-                               :dir?  true}))
+           (map (fn [^Path p]
+                  ;; Directory URIs end in '/': file:// and mtp:// already do; smb-nio
+                  ;; needs it so a re-entered child is treated as a folder, not a file.
+                  (let [u (str (.toUri p))]
+                    {:name  (str (.getFileName p))
+                     :uri   (if (str/ends-with? u "/") u (str u "/"))
+                     :dir?  true})))
            (sort-by :name)
            (vec)))))
 
