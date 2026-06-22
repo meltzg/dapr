@@ -124,9 +124,9 @@
     ;; crush the button next to it.
     {:fx/type :label :wrap-text true
      :text (cond
-             (nil? cwd)               "Pick a location to start"
+             (nil? cwd)              "Pick a location to start"
              (lib/smb-host-root? cwd) "Pick a share to continue"
-             :else                    cwd)}
+             :else                   cwd)}
     {:fx/type :button :text "Use this folder"
      ;; A bare SMB host (smb://host/) lists shares to browse, but is not itself a
      ;; usable root — a share must be entered first.
@@ -196,29 +196,58 @@
               {:fx/type :label :text (fmt/capacity-text capacity)
                :style (if (fmt/over-capacity? capacity) "-fx-text-fill: red;" "")}]})
 
-(defn- track-rows [{:keys [source-catalog sink-catalog selected free-bytes]}]
-  (for [t (sort-by (juxt :name :rel) (vals source-catalog))
-        :let [k    (:key t)
-              on?  (contains? selected k)
-              fits (cap/would-fit? k selected source-catalog sink-catalog free-bytes)]]
-    {:fx/type  :check-box
-     :text     (fmt/track-row-label t (get sink-catalog k))
-     :selected on?
-     :disable  (and (not on?) (not fits))
-     :on-selected-changed {:event/type ::events/toggle-track :key k}}))
+(defn- track-items
+  "Resolve the source catalog into a sorted vector of row maps for the track
+  list, one per track: {:key :label :on? :disable}. Capacity is checked in
+  constant time per row against the selection's remaining free bytes (computed
+  once from :capacity), so this stays O(n) even for libraries of many thousands
+  of tracks — see dapr.domain.capacity/row-fits?."
+  [{:keys [source-catalog sink-catalog selected capacity]}]
+  (let [free (:free capacity)]
+    (->> (vals source-catalog)
+         (sort-by (juxt :name :rel))
+         (mapv (fn [t]
+                 (let [k   (:key t)
+                       on? (contains? selected k)]
+                   {:key     k
+                    :label   (fmt/track-row-label t (get sink-catalog k))
+                    :on?     on?
+                    :disable (and (not on?)
+                                  (not (cap/row-fits? k (:size t) selected sink-catalog free)))}))))))
 
-(defn- track-list [state]
-  {:fx/type     :scroll-pane
-   :v-box/vgrow :always
-   :fit-to-width true
-   :content     {:fx/type :v-box :spacing 2 :children (vec (track-rows state))}})
+(defn- track-list
+  "The source-track picker as a virtualized ListView: JavaFX realizes only the
+  cells currently scrolled into view (a few dozen), not one node per track, so a
+  multi-thousand-track library scrolls and toggles smoothly. Each cell is a
+  checkbox; toggling it dispatches ::toggle-track."
+  [state]
+  {:fx/type      :list-view
+   :v-box/vgrow  :always
+   :items        (track-items state)
+   :cell-factory {:fx/cell-type :list-cell
+                  :describe (fn [{:keys [key label on? disable]}]
+                              {:graphic {:fx/type  :check-box
+                                         :text     label
+                                         :selected on?
+                                         :disable  disable
+                                         :on-selected-changed {:event/type ::events/toggle-track :key key}}})}})
 
 (defn- progress-bar [progress]
-  {:fx/type   :progress-bar
-   :max-width Double/MAX_VALUE
-   :progress  (if (and progress (pos? (:total progress)))
-                (/ (double (:done progress)) (:total progress))
-                0.0)})
+  {:fx/type    :progress-bar
+   :max-width  Double/MAX_VALUE
+   :min-height 18
+   :progress   (if (and progress (pos? (:total progress)))
+                 (/ (double (:done progress)) (:total progress))
+                 0.0)})
+
+(defn- status-bar
+  "An always-visible strip pinned to the window bottom holding the scan/sync
+  progress bar, so it can never be clipped by the resizable split above it."
+  [progress]
+  {:fx/type   :h-box
+   :padding   8
+   :alignment :center-left
+   :children  [(assoc (progress-bar progress) :h-box/hgrow :always)]})
 
 (defn- controls-row [state status]
   {:fx/type   :h-box
@@ -231,6 +260,50 @@
                 :disable (not (fmt/can-sync? state))
                 :on-action {:event/type ::events/sync}}
                {:fx/type :label :text (str "Status: " (fmt/status-text status))}]})
+
+(defn- sync-pane
+  "Top section of the workspace: the source/sink pickers, capacity meter, the
+  track picker (which grows to fill the section), the action buttons and the plan
+  summary."
+  [{:keys [libraries source-id sink-id capacity plan status] :as state}]
+  {:fx/type    :v-box
+   :spacing    10
+   :padding    12
+   ;; Keep a floor on the sync area so dragging the divider all the way down can't
+   ;; collapse it entirely.
+   :min-height 200
+   :children   [(sync-bar libraries source-id sink-id)
+                (capacity-bar capacity)
+                (track-list state)
+                (controls-row state status)
+                {:fx/type :label :text (fmt/plan-summary-text (:summary plan))}]})
+
+(defn- activity-pane
+  "Bottom section of the workspace: the activity log, which grows to fill whatever
+  height the section is given."
+  [{:keys [log log-appends]}]
+  {:fx/type    :v-box
+   :padding    12
+   :min-height 120
+   :children   [;; :scroll-top grows with every appended line (and is large enough
+                ;; to clamp to the bottom), so the log stays pinned to the newest
+                ;; line as it streams in.
+                {:fx/type     :text-area
+                 :v-box/vgrow :always
+                 :editable    false
+                 :scroll-top  (* log-appends 1.0e7)
+                 :text        (str/join "\n" log)}]})
+
+(defn- workspace
+  "The main window body: the sync UI above a resizable activity-log panel, divided
+  by a draggable splitter — drag it down to grow the sync area, up to grow the
+  log, like an IDE's terminal panel. (The progress bar is a separate always-on
+  status strip below this, so it is never affected by the divider.)"
+  [state]
+  {:fx/type           :split-pane
+   :orientation       :vertical
+   :divider-positions [0.62]
+   :items             [(sync-pane state) (activity-pane state)]})
 
 ;; --- window assembly ---------------------------------------------------------
 
@@ -305,8 +378,9 @@
                              :on-action {:event/type ::events/settings-close}}]}]}}})
 
 (defn- main-stage
-  "The primary window: menu bar plus the sync workflow."
-  [{:keys [libraries source-id sink-id capacity plan progress status log] :as state}]
+  "The primary window: menu bar plus the sync workspace (a resizable split of the
+  sync UI over the progress + activity log)."
+  [state]
   {:fx/type :stage
    :showing true
    :title   "Dapr — music library sync"
@@ -318,22 +392,8 @@
     :root
     {:fx/type :border-pane
      :top     (menu-bar)
-     :center
-     {:fx/type  :v-box
-      :spacing  10
-      :padding  12
-      :children [(sync-bar libraries source-id sink-id)
-                 (capacity-bar capacity)
-                 (track-list state)
-                 (controls-row state status)
-                 {:fx/type :label :text (fmt/plan-summary-text (:summary plan))}
-                 (progress-bar progress)
-                 ;; :scroll-top grows with every appended line (and is large
-                 ;; enough to clamp to the bottom), so the log stays pinned to
-                 ;; the newest line as it streams in.
-                 {:fx/type :text-area :pref-height 120 :editable false
-                  :scroll-top (* (:log-appends state) 1.0e7)
-                  :text (str/join "\n" log)}]}}}})
+     :center  (workspace state)
+     :bottom  (status-bar (:progress state))}}})
 
 (defn root-view
   "Render the whole application: the main window plus the (modal) settings

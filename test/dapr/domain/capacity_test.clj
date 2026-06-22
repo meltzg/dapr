@@ -38,3 +38,19 @@
       (is (true? (cap/would-fit? [:a 10] selected source sink 0))))
     (testing "a key already on the sink always fits"
       (is (true? (cap/would-fit? [:d 40] selected source sink 0))))))
+
+(deftest row-fits?-test
+  ;; Given the same selection (used = 30, budget = 75), :free = 45, row-fits?
+  ;; reproduces would-fit? in constant time per row.
+  (let [selected #{[:a 10] [:b 20]}
+        free     45]
+    (testing "a new track within the remaining free space fits"
+      (is (true? (cap/row-fits? [:c 30] 30 selected sink free))))
+    (testing "a new track larger than the remaining free space does not fit"
+      (is (false? (cap/row-fits? [:x 50] 50 selected sink free))))
+    (testing "an already-selected key always fits, even with no free space"
+      (is (true? (cap/row-fits? [:a 10] 10 selected sink 0))))
+    (testing "a key already on the sink always fits, even with no free space"
+      (is (true? (cap/row-fits? [:d 40] 40 selected sink 0))))
+    (testing "nil free is treated as zero"
+      (is (false? (cap/row-fits? [:c 30] 30 selected sink nil))))))

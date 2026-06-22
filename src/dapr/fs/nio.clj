@@ -80,34 +80,50 @@
   directory whose listing hangs (the last :dir event before the freeze names it).
   Reads one attribute set per entry, the same as Files/walkFileTree would.
 
-  `on-scan`, when supplied, is called with {:type :dir :rel <dir rel path>} as
-  each directory is entered and {:type :file :track <track map>} for each audio
-  file found. Entries that fail to stat, and sub-directories that fail to open,
-  are skipped (matching Files/walkFileTree's visitFileFailed=CONTINUE). If
-  `on-scan` throws an ex-info carrying :dapr/abort, the whole walk unwinds (used
-  to cancel a scan that a newer one has superseded)."
+  `on-scan`, when supplied, is called with:
+    {:type :dir     :rel <dir rel path>} as each directory is *entered*, before its
+                                         listing call (so the last :dir before a
+                                         freeze names the directory whose listing
+                                         hung over MTP);
+    {:type :listing :count <n>}          once that directory's children are listed,
+                                         so progress totals can grow as the walk
+                                         recurses (n is its immediate child count);
+    {:type :entry}                       for every child visited, advancing the
+                                         done count toward the total;
+    {:type :file    :track <track map>}  for each audio file found.
+  Entries that fail to stat, and sub-directories that fail to open, are skipped
+  (matching Files/walkFileTree's visitFileFailed=CONTINUE). If `on-scan` throws an
+  ex-info carrying :dapr/abort, the whole walk unwinds (used to cancel a scan that
+  a newer one has superseded)."
   [^Path root uri extensions on-scan]
   (let [acc (java.util.ArrayList.)]
     (letfn [(walk! [^Path dir]
               (when on-scan (on-scan {:type :dir :rel (relative-key root dir)}))
               (with-open [^DirectoryStream stream (Files/newDirectoryStream dir)]
-                (doseq [^Path p (iterator-seq (.iterator stream))]
-                  (when-let [^BasicFileAttributes attrs
-                             (try (Files/readAttributes p BasicFileAttributes (make-array LinkOption 0))
-                                  (catch Exception _ nil))]
-                    (cond
-                      (.isDirectory attrs)
-                      ;; Skip a sub-directory that fails to open, but let an on-scan
-                      ;; abort (e.g. a superseded scan, carrying ex-data) propagate.
-                      (try (walk! p)
-                           (catch Exception e
-                             (when (:dapr/abort (ex-data e)) (throw e))))
+                ;; Realize the listing (one provider round-trip, as the old lazy
+                ;; doseq already incurred) so the child count is known up front and
+                ;; can drive overall scan progress.
+                (let [entries (vec (iterator-seq (.iterator stream)))]
+                  (when on-scan (on-scan {:type :listing :count (count entries)}))
+                  (doseq [^Path p entries]
+                    (when on-scan (on-scan {:type :entry}))
+                    (when-let [^BasicFileAttributes attrs
+                               (try (Files/readAttributes p BasicFileAttributes (make-array LinkOption 0))
+                                    (catch Exception _ nil))]
+                      (cond
+                        (.isDirectory attrs)
+                        ;; Skip a sub-directory that fails to open, but let an
+                        ;; on-scan abort (a superseded scan, carrying ex-data)
+                        ;; propagate.
+                        (try (walk! p)
+                             (catch Exception e
+                               (when (:dapr/abort (ex-data e)) (throw e))))
 
-                      (and (.isRegularFile attrs)
-                           (lib/audio-file? (str (.getFileName p)) extensions))
-                      (let [track (audio-track root uri p attrs)]
-                        (.add acc track)
-                        (when on-scan (on-scan {:type :file :track track}))))))))]
+                        (and (.isRegularFile attrs)
+                             (lib/audio-file? (str (.getFileName p)) extensions))
+                        (let [track (audio-track root uri p attrs)]
+                          (.add acc track)
+                          (when on-scan (on-scan {:type :file :track track})))))))))]
       (walk! root))
     (vec acc)))
 
