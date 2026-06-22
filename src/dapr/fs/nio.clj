@@ -122,15 +122,19 @@
    (mapcat (fn [uri] (walk-audio-tracks! (root-path! uri) uri extensions on-scan)) roots)))
 
 (defn copy-file!
-  "Copy file `rel-path` from `src-root` to `dst-root`, creating parent
+  "Copy file `rel-path` from `src-root` to `dst-root`, creating intermediate
   directories and replacing any existing file. Attributes are intentionally not
-  copied: some providers (MTP) cannot set mtimes."
+  copied: some providers (MTP) cannot set mtimes.
+
+  Parent directories are created only for a *nested* rel-path. For a top-level
+  file the parent is `dst-root` itself, which already exists — and over SMB a
+  share/library root reports isDirectory=false, so createDirectories would wrongly
+  try to mkdir it and throw."
   [^Path src-root ^Path dst-root rel-path]
-  (let [src    (resolve-rel src-root rel-path)
-        dst    (resolve-rel dst-root rel-path)
-        parent (.getParent dst)]
-    (when parent
-      (Files/createDirectories parent (make-array FileAttribute 0)))
+  (let [src (resolve-rel src-root rel-path)
+        dst (resolve-rel dst-root rel-path)]
+    (when (str/includes? rel-path "/")
+      (Files/createDirectories (.getParent dst) (make-array FileAttribute 0)))
     (Files/copy src dst
                 (into-array CopyOption [StandardCopyOption/REPLACE_EXISTING]))))
 
