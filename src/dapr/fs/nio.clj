@@ -13,11 +13,6 @@
                           Files LinkOption Path StandardCopyOption)
            (java.nio.file.attribute BasicFileAttributes FileAttribute)))
 
-(defn root-path!
-  "Resolve a root URI string to the java.nio.file.Path of its directory."
-  ^Path [uri-str]
-  (device-fs/root-path! uri-str))
-
 (defn- relative-key
   "Relative path of `p` under `root`, as a string with '/' separators (so paths
   are comparable across filesystems with different separators)."
@@ -121,7 +116,7 @@
   ([roots] (catalog! roots nil))
   ([roots on-scan] (catalog! roots on-scan lib/default-audio-extensions))
   ([roots on-scan extensions]
-   (mapcat (fn [uri] (walk-audio-tracks! (root-path! uri) uri extensions on-scan)) roots)))
+   (mapcat (fn [uri] (walk-audio-tracks! (device-fs/root-path! uri) uri extensions on-scan)) roots)))
 
 (defn copy-file!
   "Copy file `rel-path` from `src-root` to `dst-root`, creating intermediate
@@ -149,7 +144,7 @@
   "Placement input for one root: {:uri :free-bytes} (usable space of its
   backing device)."
   [uri]
-  {:uri uri :free-bytes (.getUsableSpace (Files/getFileStore (root-path! uri)))})
+  {:uri uri :free-bytes (.getUsableSpace (Files/getFileStore (device-fs/root-path! uri)))})
 
 (defn library-free!
   "Total usable bytes across the distinct devices backing `roots`, so two roots
@@ -159,20 +154,12 @@
   two folders on one device (JDK local FileStores do not override equals)."
   [roots]
   (->> roots
-       (map (fn [uri] (Files/getFileStore (root-path! uri))))
+       (map (fn [uri] (Files/getFileStore (device-fs/root-path! uri))))
        (reduce (fn [acc ^FileStore fs]
                  (assoc acc [(.name fs) (.type fs)] (.getUsableSpace fs)))
                {})
        (vals)
        (reduce + 0)))
-
-(defn dir-children!
-  "Immediate sub-directories directly under `uri`, each as
-  {:name <file-name> :uri <child-uri-string> :dir? true}, sorted by name. Only
-  directories are returned; device-specific providers handle any special root
-  semantics before returning the common row shape."
-  [uri]
-  (device-fs/dir-children! uri))
 
 (defn local-places!
   "Top-level local browsing locations: each filesystem root plus the user's home

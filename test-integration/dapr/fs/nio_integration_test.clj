@@ -1,5 +1,6 @@
 (ns dapr.fs.nio-integration-test
   (:require [clojure.test :refer [deftest is testing]]
+            [dapr.device.fs :as device-fs]
             [dapr.fs.nio :as nio]
             [dapr.test-fs :as tfs]))
 
@@ -96,12 +97,12 @@
         (tfs/root (.getFileSystem d) (str d "/Internal"))
         (tfs/root (.getFileSystem d) (str d "/SD Card"))
         (tfs/write! (.resolve d "loose.mp3") "x")
-        (let [entries (nio/dir-children! (tfs/uri-of d))]
+        (let [entries (device-fs/dir-children! (tfs/uri-of d))]
           (is (= ["Internal" "SD Card"] (mapv :name entries)))
           (is (every? :dir? entries))
           (testing "child URIs resolve back to the same path (so descent works)"
             (is (= #{(.resolve d "Internal") (.resolve d "SD Card")}
-                   (set (map #(nio/root-path! (:uri %)) entries))))))
+                   (set (map #(device-fs/root-path! (:uri %)) entries))))))
         (finally
           (tfs/delete-tree! d))))))
 

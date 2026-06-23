@@ -6,6 +6,7 @@
   responsive."
   (:require [dapr.device.events :as device-events]
             [dapr.device.file.events]
+            [dapr.device.format :as device]
             [dapr.device.mtp.events]
             [dapr.device.smb.events]
             [dapr.domain.library :as lib]
@@ -198,7 +199,7 @@
                                :device/type (:device/type event)})
       ::library-edit   (when-let [l (state/library-by-id @state-atom (:id event))]
                          (swap! state-atom state/set-editor
-                                (assoc l :device/type (some-> (first (:roots l)) lib/scheme keyword))))
+                                (assoc l :device/type (device/device-type (first (:roots l))))))
       ::library-delete (do (swap! state-atom state/delete-library (:id event))
                            (persist! state-atom))
 

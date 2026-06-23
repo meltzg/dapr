@@ -1,7 +1,7 @@
 (ns dapr.device.file.events
   (:require [dapr.device.events :as device-events]
             [dapr.device.file.fs :as file-fs]
-            [dapr.fs.nio :as nio]
+            [dapr.device.fs :as device-fs]
             [dapr.state :as state]))
 
 (defmethod device-events/open-browser! :file [_ state-atom]
@@ -12,5 +12,5 @@
 
 (defmethod device-events/browser-entries! :file [{:keys [cwd]}]
   (if cwd
-    (nio/dir-children! cwd)
+    (device-fs/dir-children! cwd)
     (file-fs/local-places!)))

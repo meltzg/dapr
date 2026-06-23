@@ -13,7 +13,7 @@
             [dapr.device.file.format]
             [dapr.device.format :as device]
             [dapr.device.mtp.format]
-            [dapr.device.smb.format :as smb-format]))
+            [dapr.device.smb.format]))
 
 (def supported-schemes
   "URI schemes a library root may use."
@@ -23,47 +23,21 @@
   "File extensions (lowercase, no dot) treated as tracks by default."
   #{"mp3" "flac" "m4a" "aac" "ogg" "opus" "wav" "wma"})
 
-(defn scheme
-  "Lowercased URI scheme of `uri-str`, or nil if not a string or unparseable."
-  [uri-str]
-  (device/scheme uri-str))
-
-(defn supported-scheme?
-  "True when `uri-str` uses a scheme a library root may use."
-  [uri-str]
-  (device/supported-root? uri-str))
-
-(defn smb-host-root?
-  "True when `uri-str` is an SMB server root (smb://host/) with no share chosen — a
-  location to browse for shares, not a usable library root."
-  [uri-str]
-  (smb-format/host-root? uri-str))
-
-(defn device-key
-  "Key identifying the device a root lives on, used to keep one library's roots on
-  a single device. All file:// roots share the key \"file\" (the local machine);
-  each MTP device gets its own key \"mtp://<id>\" from the URI authority; each SMB
-  share gets the key \"smb://<host>/<share>\" (the share is the unit jcifs reports
-  free space for, so two roots on one share are not double-counted). Returns nil
-  for an unparseable/unsupported URI."
-  [uri-str]
-  (device/root-device-key uri-str))
-
 (defn roots-device-key
   "The device-key shared by `roots`, or nil when there are none. Roots are kept to
   one device (see root-addable?), so a consistent set has exactly one such key."
   [roots]
-  (some-> (seq roots) first device-key))
+  (some-> (seq roots) first device/root-device-key))
 
 (defn root-addable?
   "True when `uri` may be added alongside `roots`: it must use a supported scheme,
   point inside a share (not a bare SMB host), and live on the same device as the
   roots already present."
   [roots uri]
-  (and (supported-scheme? uri)
+  (and (device/supported-root? uri)
        (device/selectable-root? uri)
        (let [existing (roots-device-key roots)]
-         (or (nil? existing) (= existing (device-key uri))))))
+         (or (nil? existing) (= existing (device/root-device-key uri))))))
 
 (defn library-valid?
   "True when `library` has a non-blank name and at least one root, all roots using
@@ -73,9 +47,9 @@
   (boolean (and (string? name)
                 (not (str/blank? name))
                 (seq roots)
-                (every? supported-scheme? roots)
+                (every? device/supported-root? roots)
                 (every? device/selectable-root? roots)
-                (apply = (map device-key roots)))))
+                (apply = (map device/root-device-key roots)))))
 
 (defn extension
   "Lowercased extension of `filename` (without the dot), or nil."

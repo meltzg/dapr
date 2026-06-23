@@ -1,7 +1,7 @@
 (ns dapr.device.mtp.events
   (:require [dapr.device.events :as device-events]
+            [dapr.device.fs :as device-fs]
             [dapr.device.mtp.fs :as mtp-fs]
-            [dapr.fs.nio :as nio]
             [dapr.state :as state]))
 
 (defmethod device-events/open-browser! :mtp [_ state-atom]
@@ -19,4 +19,4 @@
   true)
 
 (defmethod device-events/browser-entries! :mtp [{:keys [cwd]}]
-  (nio/dir-children! cwd))
+  (device-fs/dir-children! cwd))

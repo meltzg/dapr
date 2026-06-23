@@ -1,5 +1,5 @@
 (ns dapr.device.mtp.views
-  (:require [dapr.domain.library :as lib]
+  (:require [dapr.device.format :as device-format]
             [dapr.device.views :as device-views]))
 
 (defmethod device-views/library-menu-item :mtp [device-type]
@@ -18,7 +18,7 @@
                                  {:fx/type :button :max-width Double/MAX_VALUE
                                   :alignment :baseline-left :text (str "📱  " (:name d))
                                   :disable (and (some? allowed)
-                                                (not= allowed (lib/device-key (:uri d))))
+                                                (not= allowed (device-format/root-device-key (:uri d))))
                                   :on-action {:event/type :dapr.ui.events/browser-device :device d}})
                                devices)
            :else         [{:fx/type :label :text "(no MTP devices found)"}]))})

@@ -1,9 +1,9 @@
 (ns dapr.device.smb.events
   (:require [clojure.string :as str]
             [dapr.device.events :as device-events]
+            [dapr.device.fs :as device-fs]
             [dapr.device.smb.fs :as smb-fs]
             [dapr.fs.credentials :as credentials]
-            [dapr.fs.nio :as nio]
             [dapr.state :as state]))
 
 (defn- normalize-url
@@ -53,4 +53,4 @@
         false))))
 
 (defmethod device-events/browser-entries! :smb [{:keys [cwd]}]
-  (nio/dir-children! cwd))
+  (device-fs/dir-children! cwd))
