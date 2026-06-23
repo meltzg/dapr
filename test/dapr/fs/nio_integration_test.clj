@@ -50,6 +50,32 @@
           (tfs/delete-tree! d1)
           (tfs/delete-tree! d2))))))
 
+(deftest scan-progress-events-test
+  (testing ":listing counts and :entry ticks balance, so done reaches total"
+    (let [d (tfs/temp-dir!)]
+      (try
+        (tfs/write! (.resolve d "a.mp3") "aaa")
+        (tfs/write! (.resolve d "cover.jpg") "img")
+        (tfs/write! (.resolve d "sub/b.flac") "bb")
+        (let [total   (atom 0)                       ; Σ directory child counts
+              done    (atom 0)                       ; entries visited
+              entered (atom [])]                     ; :dir events, in order
+          (nio/catalog! [(tfs/uri-of d)]
+                        (fn [{:keys [type rel] :as ev}]
+                          (case type
+                            :dir     (swap! entered conj rel)
+                            :listing (swap! total + (:count ev))
+                            :entry   (swap! done inc)
+                            nil)))
+          (testing "every child is both counted (total) and visited (done)"
+            ;; root has 3 children (a.mp3, cover.jpg, sub), sub has 1 (b.flac)
+            (is (= 4 @total))
+            (is (= @total @done)))
+          (testing "each directory is entered (a :dir event) before its listing"
+            (is (= ["" "sub"] @entered))))
+        (finally
+          (tfs/delete-tree! d))))))
+
 (deftest walk-abort-propagates-test
   (testing "on-scan throwing :dapr/abort unwinds the walk (not swallowed as a dir error)"
     (let [d (tfs/temp-dir!)]

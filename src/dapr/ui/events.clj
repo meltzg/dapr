@@ -50,14 +50,43 @@
   (boolean (some #(:dapr/abort (ex-data %))
                  (take-while some? (iterate #(some-> ^Throwable % .getCause) t)))))
 
+(def ^:private progress-update-stride
+  "Publish scan progress to the UI only every Nth visited entry (plus on every
+  directory listing), so a large scan advances the progress bar steadily without a
+  state swap — and re-render — for every single file."
+  64)
+
+(defn- begin-progress!
+  "Reset the UI progress bar and return a fresh shared accumulator {:done :total}
+  that the (possibly concurrent) source and sink scans both feed."
+  [state-atom]
+  (swap! state-atom state/set-progress {:done 0 :total 0})
+  (atom {:done 0 :total 0}))
+
+(defn- scan-progress!
+  "Fold one scan event into the shared `prog` accumulator and, on a throttled
+  cadence, publish it to state's :progress so the bar advances. :listing events
+  grow the total by a directory's child count (so the total climbs as the walk
+  recurses deeper); :entry events advance done toward it."
+  [state-atom prog ev]
+  (case (:type ev)
+    :listing (let [p (swap! prog update :total + (:count ev))]
+               (swap! state-atom state/set-progress (select-keys p [:done :total])))
+    :entry   (let [p (swap! prog update :done inc)]
+               (when (zero? (mod (:done p) progress-update-stride))
+                 (swap! state-atom state/set-progress (select-keys p [:done :total]))))
+    nil))
+
 (defn- scan-callback
-  "An on-scan callback that logs progress (see scan-logger) but first aborts the
-  walk, by throwing, once `superseded?` reports a newer scan has started."
-  [state-atom label superseded?]
+  "An on-scan callback that accumulates overall scan progress into `prog` and logs
+  progress (see scan-logger), but first aborts the walk, by throwing, once
+  `superseded?` reports a newer scan has started."
+  [state-atom label superseded? prog]
   (let [log (scan-logger state-atom label)]
     (fn [ev]
       (when (superseded?)
         (throw (ex-info "scan superseded" {:dapr/abort true})))
+      (scan-progress! state-atom prog ev)
       (log ev))))
 
 (defn- reload-catalogs!
@@ -66,6 +95,7 @@
   Supersedes any scan still running from an earlier source/sink change."
   [state-atom]
   (let [superseded? (begin-scan! state-atom)
+        prog        (begin-progress! state-atom)
         s           @state-atom
         src         (state/library-by-id s (:source-id s))
         snk         (state/library-by-id s (:sink-id s))]
@@ -77,15 +107,17 @@
       (try
         ;; Scan source and sink concurrently — melt-jfs serializes per device, so
         ;; this overlaps work whenever they are on different devices (the common
-        ;; case: one local, one MTP) and is harmless when they share one.
-        (let [src-fut (future (sync/catalog-of! src (scan-callback state-atom (:name src) superseded?)))
-              snk-cat (sync/catalog-of! snk (scan-callback state-atom (:name snk) superseded?))
+        ;; case: one local, one MTP) and is harmless when they share one. Both feed
+        ;; the one shared progress accumulator.
+        (let [src-fut (future (sync/catalog-of! src (scan-callback state-atom (:name src) superseded? prog)))
+              snk-cat (sync/catalog-of! snk (scan-callback state-atom (:name snk) superseded? prog))
               src-cat @src-fut
               free    (sync/library-free! snk)]
           (when-not (superseded?)
             (swap! state-atom
                    (fn [s] (-> s
                                (state/set-catalogs src-cat snk-cat free)
+                               (state/set-progress nil)
                                (state/set-status :idle)
                                (state/append-log (format "Source %d · Sink %d tracks · %s free."
                                                          (count src-cat) (count snk-cat)
@@ -98,6 +130,7 @@
 
 (defn- run-preview! [state-atom]
   (let [superseded? (begin-scan! state-atom)
+        prog        (begin-progress! state-atom)
         s           @state-atom
         src         (state/library-by-id s (:source-id s))
         snk         (state/library-by-id s (:sink-id s))]
@@ -106,12 +139,13 @@
                                   (state/append-log "Computing plan…"))))
     (try
       (let [actions (sync/build-plan! src snk (:selected s)
-                                      {:on-source (scan-callback state-atom (:name src) superseded?)
-                                       :on-sink   (scan-callback state-atom (:name snk) superseded?)})
+                                      {:on-source (scan-callback state-atom (:name src) superseded? prog)
+                                       :on-sink   (scan-callback state-atom (:name snk) superseded? prog)})
             summ    (plan/summary actions)]
         (when-not (superseded?)
           (swap! state-atom (fn [s] (-> s
                                         (state/set-plan actions summ)
+                                        (state/set-progress nil)
                                         (state/append-log (fmt/plan-summary-text summ)))))))
       (catch Throwable t
         (when-not (superseded-ex? t)

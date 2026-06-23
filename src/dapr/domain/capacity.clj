@@ -37,3 +37,14 @@
       (<= (+ (used selected source-catalog sink-catalog)
              (track-size k source-catalog sink-catalog))
           (budget free-bytes sink-catalog))))
+
+(defn row-fits?
+  "Constant-time variant of would-fit? for rendering many rows: pass the `free`
+  bytes remaining for the current selection (the :free of a usage snapshot, i.e.
+  budget − used) computed once, rather than recomputing the whole selection total
+  per row. A key already selected, or already on the sink, adds no new bytes and
+  always fits; otherwise its `size` must not exceed `free`."
+  [k size selected sink-catalog free]
+  (or (contains? selected k)
+      (contains? sink-catalog k)
+      (<= size (or free 0))))
