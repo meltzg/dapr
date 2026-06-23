@@ -3,7 +3,7 @@
 
   A *library* is {:id <string> :name <string> :roots [<uri-string> ...]} where
   each root addresses a directory on a java.nio filesystem; supported URI
-  schemes are \"file\" and \"mtp\". A *track* is one audio file discovered under
+  schemes are \"file\", \"mtp\" and \"smb\". A *track* is one audio file discovered under
   a library's roots: {:key [filename size] :name :size :mtime :root :rel}. A
   *catalog* is a map of track :key -> track. Track identity is [rel size] — the
   path relative to its root, plus byte size, with the root deliberately excluded
@@ -14,7 +14,7 @@
 
 (def supported-schemes
   "URI schemes a library root may use."
-  #{"file" "mtp"})
+  #{"file" "mtp" "smb"})
 
 (def default-audio-extensions
   "File extensions (lowercase, no dot) treated as tracks by default."
@@ -33,15 +33,35 @@
   [uri-str]
   (contains? supported-schemes (scheme uri-str)))
 
+(defn- smb-share
+  "The share segment (first path element) of an smb:// URI string, or nil when the
+  URI addresses only the server root (smb://host/), which has no share yet."
+  [uri-str]
+  (try (->> (str/split (str (.getPath (URI. ^String uri-str))) #"/")
+            (remove str/blank?)
+            (first))
+       (catch URISyntaxException _ nil)))
+
+(defn smb-host-root?
+  "True when `uri-str` is an SMB server root (smb://host/) with no share chosen — a
+  location to browse for shares, not a usable library root."
+  [uri-str]
+  (and (= "smb" (scheme uri-str))
+       (nil? (smb-share uri-str))))
+
 (defn device-key
   "Key identifying the device a root lives on, used to keep one library's roots on
   a single device. All file:// roots share the key \"file\" (the local machine);
-  each MTP device gets its own key \"mtp://<id>\" from the URI authority. Returns
-  nil for an unparseable/unsupported URI."
+  each MTP device gets its own key \"mtp://<id>\" from the URI authority; each SMB
+  share gets the key \"smb://<host>/<share>\" (the share is the unit jcifs reports
+  free space for, so two roots on one share are not double-counted). Returns nil
+  for an unparseable/unsupported URI."
   [uri-str]
   (case (scheme uri-str)
     "file" "file"
     "mtp"  (try (str "mtp://" (.getAuthority (URI. ^String uri-str)))
+                (catch URISyntaxException _ nil))
+    "smb"  (try (str "smb://" (.getAuthority (URI. ^String uri-str)) "/" (smb-share uri-str))
                 (catch URISyntaxException _ nil))
     nil))
 
@@ -52,21 +72,25 @@
   (some-> (seq roots) first device-key))
 
 (defn root-addable?
-  "True when `uri` may be added alongside `roots`: it must use a supported scheme
-  and live on the same device as the roots already present."
+  "True when `uri` may be added alongside `roots`: it must use a supported scheme,
+  point inside a share (not a bare SMB host), and live on the same device as the
+  roots already present."
   [roots uri]
   (and (supported-scheme? uri)
+       (not (smb-host-root? uri))
        (let [existing (roots-device-key roots)]
          (or (nil? existing) (= existing (device-key uri))))))
 
 (defn library-valid?
   "True when `library` has a non-blank name and at least one root, all roots using
-  a supported scheme and living on a single device."
+  a supported scheme, pointing inside a share (not a bare SMB host), and living on
+  a single device."
   [{:keys [name roots]}]
   (boolean (and (string? name)
                 (not (str/blank? name))
                 (seq roots)
                 (every? supported-scheme? roots)
+                (not-any? smb-host-root? roots)
                 (apply = (map device-key roots)))))
 
 (defn extension

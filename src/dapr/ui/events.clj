@@ -4,9 +4,12 @@
   dapr.library.store. Each handler runs on the JavaFX Application Thread, so
   long-running scans/copies are dispatched to background threads to keep the UI
   responsive."
-  (:require [dapr.domain.library :as lib]
+  (:require [clojure.string :as str]
+            [dapr.domain.library :as lib]
             [dapr.domain.plan :as plan]
+            [dapr.fs.credentials :as credentials]
             [dapr.fs.nio :as nio]
+            [dapr.fs.smb :as smb]
             [dapr.library.store :as store]
             [dapr.state :as state]
             [dapr.sync :as sync]
@@ -162,6 +165,48 @@
                                         (state/browser-set-entries [])
                                         (state/append-log (str "Browse failed: " (.getMessage t)))))))))))
 
+(defn- normalize-smb-url
+  "Trim an entered SMB URL and ensure it ends with '/', since smb-nio treats a
+  trailing slash as marking a directory."
+  [url]
+  (let [u (str/trim (or url ""))]
+    (cond-> u (not (str/ends-with? u "/")) (str "/"))))
+
+(def ^:private smb-url-re
+  "An SMB URL with at least a host, e.g. smb://nas/ (lists the host's shares) or
+  smb://nas/Music/ (a specific share)."
+  #"(?i)^smb://[^/]+")
+
+(defn- save-smb-credentials!
+  "Persist the connect form's credentials for the share's host to the OS keystore.
+  A blank username means guest access, so nothing is stored. Failures (e.g. no
+  keystore daemon available) are logged, not fatal."
+  [state-atom url {:keys [username] :as creds}]
+  (when-not (str/blank? username)
+    (try
+      (let [host (smb/host-of url)]
+        (credentials/save! host creds)
+        (swap! state-atom state/append-log
+               (format "Saved SMB credentials for %s to the OS keystore." host)))
+      (catch Throwable t
+        (swap! state-atom state/append-log
+               (str "Couldn't save SMB credentials (is an OS keystore available?): "
+                    (.getMessage t)))))))
+
+(defn- connect-smb!
+  "Validate the SMB connect form, save any credentials, then start browsing the
+  share's root folder."
+  [state-atom]
+  (let [{:keys [url username password workgroup]} (:browser @state-atom)
+        url (normalize-smb-url url)]
+    (if (re-find smb-url-re url)
+      (do (save-smb-credentials! state-atom url
+                                 {:username username :password password :workgroup workgroup})
+          (swap! state-atom state/browser-connect url)
+          (browse-load! state-atom))
+      (swap! state-atom state/append-log
+             "Enter an SMB URL like smb://host/ (to list shares) or smb://host/share/ before connecting."))))
+
 (def ^:private mixed-device-msg
   "A library's roots must all live on one device — remove the existing roots first to switch device.")
 
@@ -194,13 +239,18 @@
       ::editor-remove-root (swap! state-atom state/editor-remove-root (:uri event))
 
       ;; folder browser — the editor's :kind decides where it opens: file://
-      ;; navigates folders directly, mtp:// first picks one connected device
+      ;; navigates folders directly, mtp:// first picks one connected device,
+      ;; smb:// first enters a share URL + optional credentials
       ::editor-browse        (case (get-in @state-atom [:editor :kind])
                                :file (do (swap! state-atom state/browser-choose-file)
                                          (browse-load! state-atom))
                                :mtp  (do (swap! state-atom state/browser-choose-mtp)
                                          (load-devices! state-atom))
+                               :smb  (swap! state-atom state/browser-choose-smb)
                                nil)
+      ::browser-connect-field (swap! state-atom state/browser-connect-field
+                                     (:field event) (:fx/event event))
+      ::browser-connect      (connect-smb! state-atom)
       ::browser-device       (do (swap! state-atom state/browser-choose-device (:device event))
                                  (browse-load! state-atom))
       ::browser-enter        (do (swap! state-atom state/browser-enter (:child event))
@@ -223,7 +273,7 @@
           (do (swap! state-atom (fn [s] (-> s (state/upsert-library library) (state/cancel-editor))))
               (persist! state-atom))
           (swap! state-atom state/append-log
-                 "Library needs a name and at least one file:// or mtp:// root.")))
+                 "Library needs a name and at least one file://, mtp:// or smb:// root.")))
       ::editor-cancel (swap! state-atom state/cancel-editor)
 
       ;; sync workflow

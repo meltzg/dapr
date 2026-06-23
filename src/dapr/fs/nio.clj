@@ -4,7 +4,8 @@
   provider supplied by melt-jfs. Pure data shaping lives in dapr.domain.*;
   everything here performs I/O (all fns end in !)."
   (:require [clojure.string :as str]
-            [dapr.domain.library :as lib])
+            [dapr.domain.library :as lib]
+            [dapr.fs.smb :as smb])
   (:import (java.io File)
            (java.net URI)
            (java.nio.file CopyOption DirectoryStream FileStore
@@ -23,12 +24,19 @@
 
 (defn root-path!
   "Resolve a root URI string to the java.nio.file.Path of its directory, opening
-  a non-default filesystem (e.g. mtp://) on demand."
+  a non-default filesystem (e.g. mtp://) on demand. smb:// is delegated to
+  dapr.fs.smb, which authenticates from the OS keystore and resolves the Path on
+  its own host-keyed FileSystem — Paths/get cannot be used there because smb-nio
+  caches FileSystems under a credential-bearing authority that the credential-free
+  root URI cannot reproduce."
   ^Path [uri-str]
-  (let [uri (URI. ^String uri-str)]
-    (when-not (= "file" (str/lower-case (str (.getScheme uri))))
-      (ensure-filesystem! uri))
-    (Paths/get uri)))
+  (let [uri    (URI. ^String uri-str)
+        scheme (str/lower-case (str (.getScheme uri)))]
+    (case scheme
+      "file" (Paths/get uri)
+      "smb"  (smb/root-path! uri-str)
+      (do (ensure-filesystem! uri)
+          (Paths/get uri)))))
 
 (defn- relative-key
   "Relative path of `p` under `root`, as a string with '/' separators (so paths
@@ -39,12 +47,19 @@
       (str/replace "\\" "/")))
 
 (defn- resolve-rel
-  "Resolve a '/'-separated relative path string against `root` segment by
-  segment, so it is valid on `root`'s filesystem regardless of its separator."
+  "Resolve a '/'-separated relative path string against `root` segment by segment,
+  so it is valid on `root`'s filesystem regardless of its separator. Every segment
+  but the last is marked as a folder (trailing '/'), because smb-nio refuses to
+  resolve a child against a path it considers a file — without this, copy/delete of
+  any nested path over SMB throws (file:// and mtp:// are unaffected, normalizing
+  the trailing slash away)."
   ^Path [^Path root rel-path]
-  (reduce (fn [^Path acc seg] (.resolve acc ^String seg))
-          root
-          (remove str/blank? (str/split rel-path #"/"))))
+  (let [segs (vec (remove str/blank? (str/split rel-path #"/")))
+        last-i (dec (count segs))]
+    (reduce (fn [^Path acc [i ^String seg]]
+              (.resolve acc (if (= i last-i) seg (str seg "/"))))
+            root
+            (map-indexed vector segs))))
 
 (defn- audio-track
   "Build a track map for audio file `p` (Path) under root `uri` (Path `root`)
@@ -107,15 +122,19 @@
    (mapcat (fn [uri] (walk-audio-tracks! (root-path! uri) uri extensions on-scan)) roots)))
 
 (defn copy-file!
-  "Copy file `rel-path` from `src-root` to `dst-root`, creating parent
+  "Copy file `rel-path` from `src-root` to `dst-root`, creating intermediate
   directories and replacing any existing file. Attributes are intentionally not
-  copied: some providers (MTP) cannot set mtimes."
+  copied: some providers (MTP) cannot set mtimes.
+
+  Parent directories are created only for a *nested* rel-path. For a top-level
+  file the parent is `dst-root` itself, which already exists — and over SMB a
+  share/library root reports isDirectory=false, so createDirectories would wrongly
+  try to mkdir it and throw."
   [^Path src-root ^Path dst-root rel-path]
-  (let [src    (resolve-rel src-root rel-path)
-        dst    (resolve-rel dst-root rel-path)
-        parent (.getParent dst)]
-    (when parent
-      (Files/createDirectories parent (make-array FileAttribute 0)))
+  (let [src (resolve-rel src-root rel-path)
+        dst (resolve-rel dst-root rel-path)]
+    (when (str/includes? rel-path "/")
+      (Files/createDirectories (.getParent dst) (make-array FileAttribute 0)))
     (Files/copy src dst
                 (into-array CopyOption [StandardCopyOption/REPLACE_EXISTING]))))
 
@@ -150,15 +169,28 @@
   {:name <file-name> :uri <child-uri-string> :dir? true}, sorted by name. Only
   directories are returned — the folder browser navigates directories, while the
   audio files inside them are discovered later by catalog!. Works unchanged
-  across providers (file://, mtp://) since both build child URIs via Path/toUri."
+  across providers (file://, mtp://) since both build child URIs via Path/toUri.
+
+  At an SMB server root (smb://host/) the entries are the host's shares, which
+  smb-nio reports with isDirectory=false; those are surfaced as navigable folders
+  so the browser can list shares, minus the hidden admin shares (IPC$, …)."
   [uri]
-  (let [root (root-path! uri)]
+  (let [root        (root-path! uri)
+        smb-shares? (lib/smb-host-root? uri)
+        keep?       (fn [^Path p]
+                      (if smb-shares?
+                        (not (str/ends-with? (str (.getFileName p)) "$"))
+                        (Files/isDirectory p (make-array LinkOption 0))))]
     (with-open [^DirectoryStream stream (Files/newDirectoryStream root)]
       (->> (iterator-seq (.iterator stream))
-           (filter (fn [^Path p] (Files/isDirectory p (make-array LinkOption 0))))
-           (map (fn [^Path p] {:name  (str (.getFileName p))
-                               :uri   (str (.toUri p))
-                               :dir?  true}))
+           (filter keep?)
+           (map (fn [^Path p]
+                  ;; Directory URIs end in '/': file:// and mtp:// already do; smb-nio
+                  ;; needs it so a re-entered child is treated as a folder, not a file.
+                  (let [u (str (.toUri p))]
+                    {:name  (str (.getFileName p))
+                     :uri   (if (str/ends-with? u "/") u (str u "/"))
+                     :dir?  true})))
            (sort-by :name)
            (vec)))))
 
