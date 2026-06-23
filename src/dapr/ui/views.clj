@@ -124,9 +124,9 @@
     ;; crush the button next to it.
     {:fx/type :label :wrap-text true
      :text (cond
-             (nil? cwd)              "Pick a location to start"
+             (nil? cwd)               "Pick a location to start"
              (lib/smb-host-root? cwd) "Pick a share to continue"
-             :else                   cwd)}
+             :else                    cwd)}
     {:fx/type :button :text "Use this folder"
      ;; A bare SMB host (smb://host/) lists shares to browse, but is not itself a
      ;; usable root — a share must be entered first.
