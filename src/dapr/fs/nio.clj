@@ -20,7 +20,7 @@
   (try
     (FileSystems/getFileSystem uri)
     (catch FileSystemNotFoundException _
-      (FileSystems/newFileSystem uri ^java.util.Map {}))))
+      (FileSystems/newFileSystem uri {}))))
 
 (defn root-path!
   "Resolve a root URI string to the java.nio.file.Path of its directory, opening
@@ -96,36 +96,42 @@
   ex-info carrying :dapr/abort, the whole walk unwinds (used to cancel a scan that
   a newer one has superseded)."
   [^Path root uri extensions on-scan]
-  (let [acc (java.util.ArrayList.)]
-    (letfn [(walk! [^Path dir]
-              (when on-scan (on-scan {:type :dir :rel (relative-key root dir)}))
-              (with-open [^DirectoryStream stream (Files/newDirectoryStream dir)]
-                ;; Realize the listing (one provider round-trip, as the old lazy
-                ;; doseq already incurred) so the child count is known up front and
-                ;; can drive overall scan progress.
-                (let [entries (vec (iterator-seq (.iterator stream)))]
-                  (when on-scan (on-scan {:type :listing :count (count entries)}))
-                  (doseq [^Path p entries]
-                    (when on-scan (on-scan {:type :entry}))
-                    (when-let [^BasicFileAttributes attrs
-                               (try (Files/readAttributes p BasicFileAttributes (make-array LinkOption 0))
-                                    (catch Exception _ nil))]
-                      (cond
-                        (.isDirectory attrs)
-                        ;; Skip a sub-directory that fails to open, but let an
-                        ;; on-scan abort (a superseded scan, carrying ex-data)
-                        ;; propagate.
-                        (try (walk! p)
-                             (catch Exception e
-                               (when (:dapr/abort (ex-data e)) (throw e))))
+  (letfn [(walk! [^Path dir]
+            (when on-scan (on-scan {:type :dir :rel (relative-key root dir)}))
+            (with-open [^DirectoryStream stream (Files/newDirectoryStream dir)]
+              ;; Realize the listing (one provider round-trip, as the old lazy
+              ;; doseq already incurred) so the child count is known up front and
+              ;; can drive overall scan progress.
+              (let [entries (vec (iterator-seq (.iterator stream)))]
+                (when on-scan (on-scan {:type :listing :count (count entries)}))
+                (reduce
+                 (fn [tracks ^Path p]
+                   (when on-scan (on-scan {:type :entry}))
+                   (if-let [^BasicFileAttributes attrs
+                            (try (Files/readAttributes p BasicFileAttributes (make-array LinkOption 0))
+                                 (catch Exception _ nil))]
+                     (cond
+                       (.isDirectory attrs)
+                       ;; Skip a sub-directory that fails to open, but let an
+                       ;; on-scan abort (a superseded scan, carrying ex-data)
+                       ;; propagate.
+                       (into tracks
+                             (try (walk! p)
+                                  (catch Exception e
+                                    (when (:dapr/abort (ex-data e)) (throw e))
+                                    [])))
 
-                        (and (.isRegularFile attrs)
-                             (lib/audio-file? (str (.getFileName p)) extensions))
-                        (let [track (audio-track root uri p attrs)]
-                          (.add acc track)
-                          (when on-scan (on-scan {:type :file :track track})))))))))]
-      (walk! root))
-    (vec acc)))
+                       (and (.isRegularFile attrs)
+                            (lib/audio-file? (str (.getFileName p)) extensions))
+                       (let [track (audio-track root uri p attrs)]
+                         (when on-scan (on-scan {:type :file :track track}))
+                         (conj tracks track))
+
+                       :else tracks)
+                     tracks))
+                 []
+                 entries))))]
+    (walk! root)))
 
 (defn catalog!
   "Scan every `root` URI of a library and return a seq of track maps for each

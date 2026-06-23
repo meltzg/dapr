@@ -46,12 +46,11 @@
   'username'/'password' keys are silently ignored (the connection then falls back to
   anonymous and the share denies access)."
   [host]
-  (let [creds (*credential-lookup* host)
-        env   (java.util.HashMap.)]
-    (when-let [v (:workgroup creds)] (.put env "jcifs.smb.client.domain" v))
-    (when-let [v (:username creds)] (.put env "jcifs.smb.client.username" v))
-    (when-let [v (:password creds)] (.put env "jcifs.smb.client.password" v))
-    env))
+  (let [{:keys [workgroup username password]} (*credential-lookup* host)]
+    (cond-> {}
+      workgroup (assoc "jcifs.smb.client.domain" workgroup)
+      username  (assoc "jcifs.smb.client.username" username)
+      password  (assoc "jcifs.smb.client.password" password))))
 
 ;; One FileSystem per host, reused across scans/copies. defonce so a dev reload
 ;; keeps live connections; the lock serializes the open so two concurrent scans
