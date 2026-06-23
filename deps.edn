@@ -53,20 +53,23 @@
    :main-opts   ["-m" "cognitect.test-runner"]
    :exec-fn     cognitect.test-runner.api/test}
 
-  ;; Integration tests against live external services (test-integration/). Kept out
-  ;; of the default :test suite, which is hermetic (jimfs only), since these need
-  ;; real services. `clojure -M:integration`. Each test's :once fixture spins up its
-  ;; backend with Testcontainers, so a run needs only Docker — no manual setup or
-  ;; env wiring; tests skip when Docker is unavailable. CI (integration.yml) just
-  ;; runs this alias. Uses :main-opts (not :exec-fn) so cognitect.test-runner's
-  ;; -main calls System/exit — both to signal pass/fail to CI and to force the JVM
-  ;; down past any non-daemon threads a client leaves running (e.g. an open SMB
-  ;; FileSystem's jcifs connection threads), which would otherwise hang the process.
+  ;; Integration tests against live backends (test-integration/). Kept out of the
+  ;; default :test suite, which is hermetic (jimfs only), since these need real
+  ;; backends. `clojure -M:integration`. Each test skips unless its backend is
+  ;; available: the SMB test's :once fixture spins up Samba with Testcontainers
+  ;; (needs only Docker — no manual setup), and the MTP test runs only when a real
+  ;; device is attached. CI (integration.yml) just runs this alias; SMB exercises on
+  ;; Linux, MTP always skips (no device). --enable-native-access is for melt-jfs's
+  ;; native MTP discovery (as in :run/:dev). Uses :main-opts (not :exec-fn) so
+  ;; cognitect.test-runner's -main calls System/exit — both to signal pass/fail to
+  ;; CI and to force the JVM down past any non-daemon threads a client leaves
+  ;; running (e.g. an open SMB FileSystem's jcifs connection threads).
   :integration
   {:extra-paths ["test-integration"]
    :extra-deps  {io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}
                  ;; Manages each backend's service container from a :once fixture.
                  org.testcontainers/testcontainers     {:mvn/version "1.21.4"}}
+   :jvm-opts    ["--enable-native-access=ALL-UNNAMED"]
    :main-opts   ["-m" "cognitect.test-runner" "-d" "test-integration"]}
 
   ;; Formatting.
