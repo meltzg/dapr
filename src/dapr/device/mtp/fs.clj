@@ -1,14 +1,34 @@
-(ns dapr.fs.mtp
+(ns dapr.device.mtp.fs
   "MTP device enumeration via melt-jfs. This is the ONLY namespace that touches
-  melt-jfs classes; it is loaded lazily (see dapr.ui.events/load-devices!) so
-  tests and lint never have to reach the native libraries.
+  melt-jfs classes; device discovery runs on a background thread off the browser
+  (see dapr.device.mtp.events/open-browser!), and any failure degrades to an empty
+  device list so tests and lint never have to reach the native libraries.
 
   Device discovery needs native libmtp/WPD access at runtime, enabled by the JVM
   option --enable-native-access=ALL-UNNAMED (set in the :run and :dev aliases).
   File copy/delete/scan against an mtp:// URI go through the generic NIO code in
-  dapr.fs.nio; only device discovery needs the melt-jfs API directly."
-  (:require [clojure.string :as str])
-  (:import (org.meltzg.fs.mtp MTPDeviceBridge)))
+  dapr.fs.nio; only device discovery and FileSystem opening are here."
+  (:require [clojure.string :as str]
+            [dapr.device.fs :as dfs])
+  (:import (java.net URI)
+           (java.nio.file FileSystemNotFoundException FileSystems Paths)
+           (org.meltzg.fs.mtp MTPDeviceBridge)))
+
+(defn- ensure-filesystem!
+  "Ensure the MTP filesystem addressed by `uri` is open."
+  [^URI uri]
+  (try
+    (FileSystems/getFileSystem uri)
+    (catch FileSystemNotFoundException _
+      (FileSystems/newFileSystem uri {}))))
+
+(defmethod dfs/root-path! :mtp [uri-str]
+  (let [uri (URI. ^String uri-str)]
+    (ensure-filesystem! uri)
+    (Paths/get uri)))
+
+(defmethod dfs/dir-children! :mtp [uri]
+  (dfs/directory-children! (dfs/root-path! uri) dfs/directory?))
 
 (defn- device-label
   "A non-blank display name for a device. libmtp often returns an empty

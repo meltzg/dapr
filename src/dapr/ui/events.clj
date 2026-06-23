@@ -4,12 +4,12 @@
   dapr.library.store. Each handler runs on the JavaFX Application Thread, so
   long-running scans/copies are dispatched to background threads to keep the UI
   responsive."
-  (:require [clojure.string :as str]
+  (:require [dapr.device.events :as device-events]
+            [dapr.device.file.events]
+            [dapr.device.mtp.events]
+            [dapr.device.smb.events]
             [dapr.domain.library :as lib]
             [dapr.domain.plan :as plan]
-            [dapr.fs.credentials :as credentials]
-            [dapr.fs.nio :as nio]
-            [dapr.fs.smb :as smb]
             [dapr.library.store :as store]
             [dapr.state :as state]
             [dapr.sync :as sync]
@@ -175,72 +175,6 @@
                                       (state/set-error (.getMessage t))
                                       (state/append-log (str "Sync failed: " (.getMessage t))))))))))
 
-(defn- load-devices!
-  "Detect connected MTP devices on a background thread and store them as the
-  browser's device list. MTP discovery is optional and lazy (the jar may be
-  absent), so it degrades to an empty list on any failure."
-  [state-atom]
-  (future
-    (let [devices (try (vec ((requiring-resolve 'dapr.fs.mtp/devices!)))
-                       (catch Throwable _ []))]
-      (swap! state-atom state/browser-set-devices devices))))
-
-(defn- browse-load!
-  "List the browser's current directory on a background thread and store the
-  result as its entries. A nil :cwd (file:// only) lists the local places."
-  [state-atom]
-  (let [cwd (get-in @state-atom [:browser :cwd])]
-    (future
-      (try
-        (let [entries (if cwd (nio/dir-children! cwd) (nio/local-places!))]
-          (swap! state-atom state/browser-set-entries entries))
-        (catch Throwable t
-          (swap! state-atom (fn [s] (-> s
-                                        (state/browser-set-entries [])
-                                        (state/append-log (str "Browse failed: " (.getMessage t)))))))))))
-
-(defn- normalize-smb-url
-  "Trim an entered SMB URL and ensure it ends with '/', since smb-nio treats a
-  trailing slash as marking a directory."
-  [url]
-  (let [u (str/trim (or url ""))]
-    (cond-> u (not (str/ends-with? u "/")) (str "/"))))
-
-(def ^:private smb-url-re
-  "An SMB URL with at least a host, e.g. smb://nas/ (lists the host's shares) or
-  smb://nas/Music/ (a specific share)."
-  #"(?i)^smb://[^/]+")
-
-(defn- save-smb-credentials!
-  "Persist the connect form's credentials for the share's host to the OS keystore.
-  A blank username means guest access, so nothing is stored. Failures (e.g. no
-  keystore daemon available) are logged, not fatal."
-  [state-atom url {:keys [username] :as creds}]
-  (when-not (str/blank? username)
-    (try
-      (let [host (smb/host-of url)]
-        (credentials/save! host creds)
-        (swap! state-atom state/append-log
-               (format "Saved SMB credentials for %s to the OS keystore." host)))
-      (catch Throwable t
-        (swap! state-atom state/append-log
-               (str "Couldn't save SMB credentials (is an OS keystore available?): "
-                    (.getMessage t)))))))
-
-(defn- connect-smb!
-  "Validate the SMB connect form, save any credentials, then start browsing the
-  share's root folder."
-  [state-atom]
-  (let [{:keys [url username password workgroup]} (:browser @state-atom)
-        url (normalize-smb-url url)]
-    (if (re-find smb-url-re url)
-      (do (save-smb-credentials! state-atom url
-                                 {:username username :password password :workgroup workgroup})
-          (swap! state-atom state/browser-connect url)
-          (browse-load! state-atom))
-      (swap! state-atom state/append-log
-             "Enter an SMB URL like smb://host/ (to list shares) or smb://host/share/ before connecting."))))
-
 (def ^:private mixed-device-msg
   "A library's roots must all live on one device — remove the existing roots first to switch device.")
 
@@ -257,14 +191,14 @@
       ::settings-close (swap! state-atom state/close-settings)
 
       ;; library manager — the device type is chosen from the New… submenu and
-      ;; pins the new library to file:// or mtp:// (editing derives it from the
-      ;; existing roots)
+      ;; pins the new library to file://, mtp:// or smb:// (editing derives it from
+      ;; the existing roots)
       ::library-new    (swap! state-atom state/set-editor
                               {:id (str (random-uuid)) :name "" :roots []
-                               :kind (:kind event)})
+                               :device/type (:device/type event)})
       ::library-edit   (when-let [l (state/library-by-id @state-atom (:id event))]
                          (swap! state-atom state/set-editor
-                                (assoc l :kind (some-> (first (:roots l)) lib/scheme keyword))))
+                                (assoc l :device/type (some-> (first (:roots l)) lib/scheme keyword))))
       ::library-delete (do (swap! state-atom state/delete-library (:id event))
                            (persist! state-atom))
 
@@ -272,27 +206,26 @@
       ::editor-name        (swap! state-atom state/editor-name (:fx/event event))
       ::editor-remove-root (swap! state-atom state/editor-remove-root (:uri event))
 
-      ;; folder browser — the editor's :kind decides where it opens: file://
-      ;; navigates folders directly, mtp:// first picks one connected device,
-      ;; smb:// first enters a share URL + optional credentials
-      ::editor-browse        (case (get-in @state-atom [:editor :kind])
-                               :file (do (swap! state-atom state/browser-choose-file)
-                                         (browse-load! state-atom))
-                               :mtp  (do (swap! state-atom state/browser-choose-mtp)
-                                         (load-devices! state-atom))
-                               :smb  (swap! state-atom state/browser-choose-smb)
-                               nil)
-      ::browser-connect-field (swap! state-atom state/browser-connect-field
+      ;; folder browser — each device type owns how its browser opens (see
+      ;; dapr.device.*.events): file:// navigates folders directly, mtp:// first
+      ;; picks a connected device, smb:// first enters a share URL + credentials.
+      ;; Once a cwd is established the navigation events below are device-generic.
+      ::editor-browse        (device-events/open-browser!
+                              (get-in @state-atom [:editor :device/type]) state-atom)
+      ::browser-connect-field (swap! state-atom state/browser-field
                                      (:field event) (:fx/event event))
-      ::browser-connect      (connect-smb! state-atom)
-      ::browser-device       (do (swap! state-atom state/browser-choose-device (:device event))
-                                 (browse-load! state-atom))
+      ::browser-connect      (when (device-events/connect!
+                                    (get-in @state-atom [:browser :device/type]) state-atom)
+                               (device-events/load-browser-entries! state-atom))
+      ::browser-device       (when (device-events/choose-device!
+                                    (get-in @state-atom [:browser :device/type]) state-atom (:device event))
+                               (device-events/load-browser-entries! state-atom))
       ::browser-enter        (do (swap! state-atom state/browser-enter (:child event))
-                                 (browse-load! state-atom))
+                                 (device-events/load-browser-entries! state-atom))
       ::browser-crumb        (do (swap! state-atom state/browser-to-crumb (:idx event))
-                                 (browse-load! state-atom))
+                                 (device-events/load-browser-entries! state-atom))
       ::browser-places       (do (swap! state-atom state/browser-to-places)
-                                 (browse-load! state-atom))
+                                 (device-events/load-browser-entries! state-atom))
       ::browser-select (when-let [uri (get-in @state-atom [:browser :cwd])]
                          (if (lib/root-addable? (get-in @state-atom [:editor :roots]) uri)
                            (swap! state-atom (fn [s] (-> s

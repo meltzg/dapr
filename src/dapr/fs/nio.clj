@@ -1,42 +1,22 @@
 (ns dapr.fs.nio
   "Side-effecting filesystem adapter built purely on java.nio.file, so it works
-  unchanged across providers — the default file:// provider and the mtp://
-  provider supplied by melt-jfs. Pure data shaping lives in dapr.domain.*;
-  everything here performs I/O (all fns end in !)."
+  unchanged across providers once a device-specific namespace has resolved a root
+  URI to a Path. Pure data shaping lives in dapr.domain.*; everything here
+  performs I/O (all fns end in !)."
   (:require [clojure.string :as str]
-            [dapr.domain.library :as lib]
-            [dapr.fs.smb :as smb])
-  (:import (java.io File)
-           (java.net URI)
-           (java.nio.file CopyOption DirectoryStream FileStore
-                          FileSystemNotFoundException FileSystems
-                          Files LinkOption Path Paths StandardCopyOption)
+            [dapr.device.file.fs :as file-fs]
+            [dapr.device.fs :as device-fs]
+            [dapr.device.mtp.fs]
+            [dapr.device.smb.fs]
+            [dapr.domain.library :as lib])
+  (:import (java.nio.file CopyOption DirectoryStream FileStore
+                          Files LinkOption Path StandardCopyOption)
            (java.nio.file.attribute BasicFileAttributes FileAttribute)))
 
-(defn- ensure-filesystem!
-  "Ensure the (possibly non-default) filesystem addressed by `uri` is open,
-  opening it on demand. Returns the FileSystem."
-  [^URI uri]
-  (try
-    (FileSystems/getFileSystem uri)
-    (catch FileSystemNotFoundException _
-      (FileSystems/newFileSystem uri {}))))
-
 (defn root-path!
-  "Resolve a root URI string to the java.nio.file.Path of its directory, opening
-  a non-default filesystem (e.g. mtp://) on demand. smb:// is delegated to
-  dapr.fs.smb, which authenticates from the OS keystore and resolves the Path on
-  its own host-keyed FileSystem — Paths/get cannot be used there because smb-nio
-  caches FileSystems under a credential-bearing authority that the credential-free
-  root URI cannot reproduce."
+  "Resolve a root URI string to the java.nio.file.Path of its directory."
   ^Path [uri-str]
-  (let [uri    (URI. ^String uri-str)
-        scheme (str/lower-case (str (.getScheme uri)))]
-    (case scheme
-      "file" (Paths/get uri)
-      "smb"  (smb/root-path! uri-str)
-      (do (ensure-filesystem! uri)
-          (Paths/get uri)))))
+  (device-fs/root-path! uri-str))
 
 (defn- relative-key
   "Relative path of `p` under `root`, as a string with '/' separators (so paths
@@ -189,40 +169,14 @@
 (defn dir-children!
   "Immediate sub-directories directly under `uri`, each as
   {:name <file-name> :uri <child-uri-string> :dir? true}, sorted by name. Only
-  directories are returned — the folder browser navigates directories, while the
-  audio files inside them are discovered later by catalog!. Works unchanged
-  across providers (file://, mtp://) since both build child URIs via Path/toUri.
-
-  At an SMB server root (smb://host/) the entries are the host's shares, which
-  smb-nio reports with isDirectory=false; those are surfaced as navigable folders
-  so the browser can list shares, minus the hidden admin shares (IPC$, …)."
+  directories are returned; device-specific providers handle any special root
+  semantics before returning the common row shape."
   [uri]
-  (let [root        (root-path! uri)
-        smb-shares? (lib/smb-host-root? uri)
-        keep?       (fn [^Path p]
-                      (if smb-shares?
-                        (not (str/ends-with? (str (.getFileName p)) "$"))
-                        (Files/isDirectory p (make-array LinkOption 0))))]
-    (with-open [^DirectoryStream stream (Files/newDirectoryStream root)]
-      (->> (iterator-seq (.iterator stream))
-           (filter keep?)
-           (map (fn [^Path p]
-                  ;; Directory URIs end in '/': file:// and mtp:// already do; smb-nio
-                  ;; needs it so a re-entered child is treated as a folder, not a file.
-                  (let [u (str (.toUri p))]
-                    {:name  (str (.getFileName p))
-                     :uri   (if (str/ends-with? u "/") u (str u "/"))
-                     :dir?  true})))
-           (sort-by :name)
-           (vec)))))
+  (device-fs/dir-children! uri))
 
 (defn local-places!
   "Top-level local browsing locations: each filesystem root plus the user's home
   directory, as {:name :uri :dir? true} entries. These seed the folder browser
-  alongside any connected MTP storages."
+  for local file:// libraries."
   []
-  (let [home  (File. (System/getProperty "user.home"))
-        entry (fn [^File f label] {:name label :uri (str (.toURI f)) :dir? true})]
-    (-> (mapv (fn [^File r] (entry r (str "Computer " (.getPath r))))
-              (File/listRoots))
-        (conj (entry home (str "Home " (.getPath home)))))))
+  (file-fs/local-places!))

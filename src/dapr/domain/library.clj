@@ -9,12 +9,15 @@
   path relative to its root, plus byte size, with the root deliberately excluded
   so the same relative path matches across roots/devices (e.g. source ROOT1/foo/
   bar.mp3 matches sink SD/foo/bar.mp3). Nothing here performs I/O."
-  (:require [clojure.string :as str])
-  (:import (java.net URI URISyntaxException)))
+  (:require [clojure.string :as str]
+            [dapr.device.file.format]
+            [dapr.device.format :as device]
+            [dapr.device.mtp.format]
+            [dapr.device.smb.format :as smb-format]))
 
 (def supported-schemes
   "URI schemes a library root may use."
-  #{"file" "mtp" "smb"})
+  (set (map name device/types)))
 
 (def default-audio-extensions
   "File extensions (lowercase, no dot) treated as tracks by default."
@@ -23,31 +26,18 @@
 (defn scheme
   "Lowercased URI scheme of `uri-str`, or nil if not a string or unparseable."
   [uri-str]
-  (when (string? uri-str)
-    (try
-      (some-> (URI. ^String uri-str) (.getScheme) (str/lower-case))
-      (catch URISyntaxException _ nil))))
+  (device/scheme uri-str))
 
 (defn supported-scheme?
   "True when `uri-str` uses a scheme a library root may use."
   [uri-str]
-  (contains? supported-schemes (scheme uri-str)))
-
-(defn- smb-share
-  "The share segment (first path element) of an smb:// URI string, or nil when the
-  URI addresses only the server root (smb://host/), which has no share yet."
-  [uri-str]
-  (try (->> (str/split (str (.getPath (URI. ^String uri-str))) #"/")
-            (remove str/blank?)
-            (first))
-       (catch URISyntaxException _ nil)))
+  (device/supported-root? uri-str))
 
 (defn smb-host-root?
   "True when `uri-str` is an SMB server root (smb://host/) with no share chosen — a
   location to browse for shares, not a usable library root."
   [uri-str]
-  (and (= "smb" (scheme uri-str))
-       (nil? (smb-share uri-str))))
+  (smb-format/host-root? uri-str))
 
 (defn device-key
   "Key identifying the device a root lives on, used to keep one library's roots on
@@ -57,13 +47,7 @@
   free space for, so two roots on one share are not double-counted). Returns nil
   for an unparseable/unsupported URI."
   [uri-str]
-  (case (scheme uri-str)
-    "file" "file"
-    "mtp"  (try (str "mtp://" (.getAuthority (URI. ^String uri-str)))
-                (catch URISyntaxException _ nil))
-    "smb"  (try (str "smb://" (.getAuthority (URI. ^String uri-str)) "/" (smb-share uri-str))
-                (catch URISyntaxException _ nil))
-    nil))
+  (device/root-device-key uri-str))
 
 (defn roots-device-key
   "The device-key shared by `roots`, or nil when there are none. Roots are kept to
@@ -77,7 +61,7 @@
   roots already present."
   [roots uri]
   (and (supported-scheme? uri)
-       (not (smb-host-root? uri))
+       (device/selectable-root? uri)
        (let [existing (roots-device-key roots)]
          (or (nil? existing) (= existing (device-key uri))))))
 
@@ -90,7 +74,7 @@
                 (not (str/blank? name))
                 (seq roots)
                 (every? supported-scheme? roots)
-                (not-any? smb-host-root? roots)
+                (every? device/selectable-root? roots)
                 (apply = (map device-key roots)))))
 
 (defn extension

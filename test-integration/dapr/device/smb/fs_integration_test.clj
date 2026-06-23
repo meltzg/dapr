@@ -1,4 +1,4 @@
-(ns dapr.fs.smb-integration-test
+(ns dapr.device.smb.fs-integration-test
   "Integration tests that exercise the real SMB code path — smb-nio / jcifs round
   trips against a live Samba server, the one thing the jimfs-backed unit tests
   cannot cover. Part of `clojure -M:integration` (not the hermetic default
@@ -11,15 +11,15 @@
   that port must be free."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
-            [dapr.fs.nio :as nio]
-            [dapr.fs.smb :as smb])
+            [dapr.device.smb.fs :as smb]
+            [dapr.fs.nio :as nio])
   (:import (java.nio.file Files Path)
            (java.nio.file.attribute FileAttribute)
            (org.testcontainers.containers FixedHostPortGenericContainer)
            (org.testcontainers.containers.wait.strategy Wait)))
 
 ;; The container binds host 445; the guest share is reached via 127.0.0.1 and the
-;; authenticated share via localhost — distinct host strings so dapr.fs.smb's
+;; authenticated share via localhost — distinct host strings so dapr.device.smb.fs's
 ;; per-host FileSystem cache keeps the anonymous and authenticated connections apart.
 (def ^:private guest-url  "smb://127.0.0.1/Music/")
 (def ^:private auth-url   "smb://localhost/Private/")

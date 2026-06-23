@@ -1,4 +1,4 @@
-(ns dapr.fs.smb
+(ns dapr.device.smb.fs
   "SMB/CIFS share access for the sync engine. smb-nio registers a java.nio
   \"smb://\" FileSystemProvider, so the generic NIO code in dapr.fs.nio reaches
   SMB shares unchanged — this namespace only opens the (authenticated) FileSystem
@@ -14,9 +14,11 @@
   This namespace imports no smb-nio/jcifs classes — it works purely through
   java.nio.file, reaching the provider via the FileSystems SPI."
   (:require [clojure.string :as str]
+            [dapr.device.fs :as dfs]
+            [dapr.device.smb.format :as smb-format]
             [dapr.fs.credentials :as credentials])
   (:import (java.net URI)
-           (java.nio.file FileSystem FileSystems Path)))
+           (java.nio.file FileSystem FileSystems Files LinkOption Path)))
 
 (defn host-of
   "Lower-cased host of an smb:// URI string (the OS-keystore account key and the
@@ -73,10 +75,21 @@
             (swap! filesystems assoc k fs)
             fs))))))
 
-(defn root-path!
+(defn resolve-root-path!
   "Resolve a persisted smb:// root URI string to a Path on its (authenticated,
   cached) FileSystem. The returned Path's toUri is credential-free, so it is safe
   to surface in the folder browser and persist as a library root."
   ^Path [uri-str]
   (let [uri (URI. ^String uri-str)]
     (.getPath (open-filesystem! uri) (share-path uri) (make-array String 0))))
+
+(defmethod dfs/root-path! :smb [uri-str]
+  (resolve-root-path! uri-str))
+
+(defmethod dfs/dir-children! :smb [uri]
+  (let [smb-shares? (smb-format/host-root? uri)
+        keep?       (fn [^Path p]
+                      (if smb-shares?
+                        (not (str/ends-with? (str (.getFileName p)) "$"))
+                        (Files/isDirectory p (make-array LinkOption 0))))]
+    (dfs/directory-children! (dfs/root-path! uri) keep?)))

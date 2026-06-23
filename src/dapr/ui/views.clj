@@ -5,6 +5,11 @@
   dapr.domain.capacity."
   (:require [cljfx.api :as fx]
             [clojure.string :as str]
+            [dapr.device.file.views]
+            [dapr.device.format :as device-format]
+            [dapr.device.mtp.views]
+            [dapr.device.smb.views]
+            [dapr.device.views :as device-views]
             [dapr.domain.capacity :as cap]
             [dapr.domain.library :as lib]
             [dapr.ui.events :as events]
@@ -20,12 +25,7 @@
    (into [{:fx/type :h-box :spacing 8 :alignment :center-left
            :children [{:fx/type :label :text "Libraries" :style "-fx-font-weight: bold;"}
                       {:fx/type :menu-button :text "New…"
-                       :items [{:fx/type :menu-item :text "💻  Local files (file://)"
-                                :on-action {:event/type ::events/library-new :kind :file}}
-                               {:fx/type :menu-item :text "📱  MTP device (mtp://)"
-                                :on-action {:event/type ::events/library-new :kind :mtp}}
-                               {:fx/type :menu-item :text "🗄  SMB share (smb://)"
-                                :on-action {:event/type ::events/library-new :kind :smb}}]}]}]
+                       :items (mapv device-views/library-menu-item device-format/types)}]}]
          (for [l libraries]
            {:fx/type :h-box :spacing 8 :alignment :center-left
             :children [{:fx/type :label :min-width 200
@@ -41,107 +41,12 @@
               {:fx/type :button :text "Remove"
                :on-action {:event/type ::events/editor-remove-root :uri uri}}]})
 
-(defn- browser-crumbs
-  "Breadcrumb trail: a root button (the device for mtp://, the share for smb://,
-  else 'Places') followed by each descended folder."
-  [kind device crumbs]
-  {:fx/type :h-box :spacing 4 :alignment :center-left
-   :children (into [{:fx/type :button
-                     :text (case kind
-                             :mtp (str "📱 " (:name device))
-                             :smb (str "🗄 " (:name device))
-                             "Places")
-                     :on-action {:event/type ::events/browser-places}}]
-                   (map-indexed
-                    (fn [i c]
-                      {:fx/type :button :text (str "▸ " (:label c))
-                       :on-action {:event/type ::events/browser-crumb :idx i}})
-                    crumbs))})
-
-(defn- browser-entry-row [entry]
-  {:fx/type :button
-   :max-width Double/MAX_VALUE
-   :alignment :baseline-left
-   :text (str "📁  " (or (:label entry) (:name entry)))
-   :on-action {:event/type ::events/browser-enter :child entry}})
-
-(defn- browser-device-chooser
-  "MTP only: choose which connected device to browse. A device that would mix with
-  the library's existing MTP root (`allowed`) is disabled."
-  [allowed {:keys [devices loading?]}]
-  {:fx/type :v-box :spacing 6
-   :children
-   (into [{:fx/type :label :text "Select an MTP device"}]
-         (cond
-           loading?      [{:fx/type :label :text "Detecting devices…"}]
-           (seq devices) (mapv (fn [d]
-                                 {:fx/type :button :max-width Double/MAX_VALUE
-                                  :alignment :baseline-left :text (str "📱  " (:name d))
-                                  :disable (and (some? allowed)
-                                                (not= allowed (lib/device-key (:uri d))))
-                                  :on-action {:event/type ::events/browser-device :device d}})
-                               devices)
-           :else         [{:fx/type :label :text "(no MTP devices found)"}]))})
-
-(defn- browser-connect-form
-  "SMB only: enter the share URL and optional credentials, then connect. A blank
-  username connects as guest; credentials entered here are saved to the OS
-  keystore (never to the library file)."
-  [{:keys [url username password workgroup loading?]}]
-  {:fx/type :v-box :spacing 6
-   :children
-   [{:fx/type :label :text "Connect to an SMB server or share"}
-    {:fx/type :text-field :prompt-text "smb://host/  (lists shares)  or  smb://host/share/" :text (or url "")
-     :on-text-changed {:event/type ::events/browser-connect-field :field :url}}
-    {:fx/type :h-box :spacing 6 :alignment :center-left
-     :children [{:fx/type :text-field :h-box/hgrow :always
-                 :prompt-text "Username (blank = guest)" :text (or username "")
-                 :on-text-changed {:event/type ::events/browser-connect-field :field :username}}
-                {:fx/type :text-field :h-box/hgrow :always
-                 :prompt-text "Workgroup (optional)" :text (or workgroup "")
-                 :on-text-changed {:event/type ::events/browser-connect-field :field :workgroup}}]}
-    {:fx/type :password-field :prompt-text "Password" :text (or password "")
-     :on-text-changed {:event/type ::events/browser-connect-field :field :password}}
-    {:fx/type :label :wrap-text true :style "-fx-text-fill: gray;"
-     :text "The password is stored in your OS keystore, not in the library file."}
-    {:fx/type :button :text (if loading? "Connecting…" "Connect")
-     :disable (boolean loading?)
-     :on-action {:event/type ::events/browser-connect}}]})
-
-(defn- browser-folders
-  "Navigate directories within the chosen file:// scope or mtp:// device."
-  [{:keys [kind device cwd crumbs entries loading?]}]
-  {:fx/type :v-box :spacing 6
-   :children
-   [(browser-crumbs kind device crumbs)
-    {:fx/type :scroll-pane :fit-to-width true :min-height 200 :pref-height 220
-     :content {:fx/type :v-box :spacing 2
-               :children (cond
-                           loading?       [{:fx/type :label :text "Loading…"}]
-                           (seq entries)  (mapv browser-entry-row entries)
-                           :else          [{:fx/type :label :text "(no sub-folders here)"}])}}
-    ;; Keep the selected path on its own line (wrapping) so a long URI can never
-    ;; crush the button next to it.
-    {:fx/type :label :wrap-text true
-     :text (cond
-             (nil? cwd)               "Pick a location to start"
-             (lib/smb-host-root? cwd) "Pick a share to continue"
-             :else                    cwd)}
-    {:fx/type :button :text "Use this folder"
-     ;; A bare SMB host (smb://host/) lists shares to browse, but is not itself a
-     ;; usable root — a share must be entered first.
-     :disable (or (nil? cwd) (lib/smb-host-root? cwd))
-     :on-action {:event/type ::events/browser-select}}]})
-
-(defn- browser-panel [allowed {:keys [phase] :as browser}]
+(defn- browser-panel [allowed browser]
   {:fx/type :v-box :spacing 6
    :style "-fx-border-color: gray; -fx-border-radius: 4; -fx-padding: 8;"
    :children
    [{:fx/type :label :text "Browse for a folder" :style "-fx-font-weight: bold;"}
-    (case phase
-      :device  (browser-device-chooser allowed browser)
-      :connect (browser-connect-form browser)
-      (browser-folders browser))
+    (device-views/browser-content allowed browser)
     {:fx/type :h-box :alignment :center-right
      :children [{:fx/type :button :text "Cancel"
                  :on-action {:event/type ::events/browser-cancel}}]}]})
@@ -318,17 +223,10 @@
               :on-action {:event/type ::events/settings-open}}]}]})
 
 (defn- browser-panel-height
-  "Estimated height of the open folder browser, which varies by phase: the MTP
-  device chooser is just a label plus one row per device, the SMB connect form is
-  a fixed set of input rows, while the folder view has a fixed-height listing area
-  (so it is roughly constant)."
-  [{:keys [phase devices loading?]}]
-  (let [chrome 74]                                  ; padding + title + spacing + Cancel
-    (+ chrome
-       (case phase
-         :device  (+ 18 (* 34 (max 1 (if loading? 1 (count devices)))))  ; "Select…" + device rows
-         :connect 220                                                    ; label + url/creds/password/note/button
-         330))))                                                         ; crumbs + listing + path + button
+  "Estimated height of the open folder browser. Device-specific chooser/connect
+  phases provide their own estimates; folder browsing is a fixed-height list."
+  [browser]
+  (+ 74 (device-views/browser-height browser)))
 
 (defn- settings-height
   "Preferred settings-window height for the current content, so the window grows

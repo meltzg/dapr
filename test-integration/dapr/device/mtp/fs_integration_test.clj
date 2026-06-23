@@ -1,4 +1,4 @@
-(ns dapr.fs.mtp-integration-test
+(ns dapr.device.mtp.fs-integration-test
   "Integration tests for the mtp:// backend (melt-jfs + native libmtp) — the one
   thing neither the jimfs unit tests nor a container can cover, since it needs a
   real device. Part of the `clojure -M:integration` suite; runs only when an MTP
@@ -11,7 +11,7 @@
   (e.g. mtp://<vendor:product:serial>/<storage>/dapr-test/)."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [dapr.fs.mtp :as mtp]
+            [dapr.device.mtp.fs :as mtp]
             [dapr.fs.nio :as nio])
   (:import (java.nio.file Files)
            (java.nio.file.attribute FileAttribute)))

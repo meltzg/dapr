@@ -72,33 +72,45 @@
                (get-in (state/editor-remove-root s "file:///music") [:editor :roots])))
         (is (nil? (:editor (state/cancel-editor s))))))))
 
-(deftest browser-test
-  (testing "choosing file opens straight into browsing local places"
-    (let [s (state/browser-choose-file state/initial-state)]
+;; Browser setup is device-specific and side-effecting (it lives in
+;; dapr.device.*.events); the pure browser transitions that the common UI drives
+;; once a device namespace has opened the browser are exercised here.
+
+(deftest browser-set-entries-test
+  (testing "set-entries records entries and clears the loading flag"
+    (let [s (-> state/initial-state
+                (state/set-browser {:phase :browse :device/type :file :device nil
+                                    :cwd nil :crumbs [] :entries [] :loading? true})
+                (state/browser-set-entries [{:name "Music" :uri "file:///m" :dir? true}]))]
+      (is (false? (get-in s [:browser :loading?])))
+      (is (= 1 (count (get-in s [:browser :entries])))))))
+
+(deftest browser-set-devices-test
+  (testing "set-devices records the device list and clears the loading flag"
+    (let [s (-> state/initial-state
+                (state/set-browser {:phase :device :device/type :mtp :devices [] :loading? true})
+                (state/browser-set-devices [{:id "1:2:a" :name "Phone" :uri "mtp://1:2:a/"}]))]
+      (is (false? (get-in s [:browser :loading?])))
+      (is (= 1 (count (get-in s [:browser :devices])))))))
+
+(deftest browser-start-browse-test
+  (testing "start-browse enters the browse phase at a chosen device root"
+    (let [s (-> state/initial-state
+                (state/set-browser {:phase :device :device/type :mtp :loading? false})
+                (state/browser-start-browse {:device {:name "Phone" :uri "mtp://1:2:a/"}
+                                             :cwd "mtp://1:2:a/"}))]
       (is (= :browse (get-in s [:browser :phase])))
-      (is (= :file (get-in s [:browser :kind])))
-      (is (nil? (get-in s [:browser :cwd])))
-      (is (true? (get-in s [:browser :loading?])))
-      (let [s (state/browser-set-entries s [{:name "Music" :uri "file:///m" :dir? true}])]
-        (is (false? (get-in s [:browser :loading?])))
-        (is (= 1 (count (get-in s [:browser :entries])))))))
-  (testing "choosing mtp opens at device selection, then a device starts browsing"
-    (let [s (state/browser-choose-mtp state/initial-state)]
-      (is (= :device (get-in s [:browser :phase])))
-      (is (= :mtp (get-in s [:browser :kind])))
-      (is (true? (get-in s [:browser :loading?])))
-      (let [s (state/browser-set-devices s [{:id "1:2:a" :name "Phone" :uri "mtp://1:2:a/"}])]
-        (is (false? (get-in s [:browser :loading?])))
-        (is (= 1 (count (get-in s [:browser :devices]))))
-        (let [s (state/browser-choose-device s {:name "Phone" :uri "mtp://1:2:a/"})]
-          (is (= :browse (get-in s [:browser :phase])))
-          (is (= {:name "Phone" :uri "mtp://1:2:a/"} (get-in s [:browser :device])))
-          (is (= "mtp://1:2:a/" (get-in s [:browser :cwd])))
-          (is (= [] (get-in s [:browser :crumbs])))))))
+      (is (= {:name "Phone" :uri "mtp://1:2:a/"} (get-in s [:browser :device])))
+      (is (= "mtp://1:2:a/" (get-in s [:browser :cwd])))
+      (is (= [] (get-in s [:browser :crumbs])))
+      (is (true? (get-in s [:browser :loading?]))))))
+
+(deftest browser-navigation-test
   (testing "entering folders pushes crumbs and tracks cwd"
     (let [s (-> state/initial-state
-                (state/browser-choose-mtp)
-                (state/browser-choose-device {:name "Phone" :uri "mtp://1:2:a/"})
+                (state/set-browser {:phase :browse :device/type :mtp
+                                    :device {:name "Phone" :uri "mtp://1:2:a/"}
+                                    :cwd "mtp://1:2:a/" :crumbs [] :entries [] :loading? false})
                 (state/browser-enter {:name "SD" :uri "mtp://1:2:a/SD"})
                 (state/browser-enter {:name "Music" :uri "mtp://1:2:a/SD/Music"}))]
       (is (= "mtp://1:2:a/SD/Music" (get-in s [:browser :cwd])))
@@ -111,15 +123,16 @@
           (is (= "mtp://1:2:a/SD" (get-in s [:browser :cwd])))
           (is (= [{:label "SD" :uri "mtp://1:2:a/SD"}]
                  (get-in s [:browser :crumbs])))))
-      (testing "returning to places resets to the device root for mtp://"
+      (testing "returning to places resets to the device root when one is set (mtp://)"
         (let [s (state/browser-to-places s)]
           (is (= "mtp://1:2:a/" (get-in s [:browser :cwd])))
           (is (= [] (get-in s [:browser :crumbs])))))
       (testing "close removes the browser entirely"
         (is (nil? (:browser (state/browser-close s)))))))
-  (testing "returning to places clears cwd for file://"
+  (testing "returning to places clears cwd when there is no device root (file://)"
     (let [s (-> state/initial-state
-                (state/browser-choose-file)
+                (state/set-browser {:phase :browse :device/type :file :device nil
+                                    :cwd "file:///m" :crumbs [] :entries [] :loading? false})
                 (state/browser-enter {:name "Music" :uri "file:///m/Music"})
                 (state/browser-to-places))]
       (is (nil? (get-in s [:browser :cwd])))
