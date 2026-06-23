@@ -110,11 +110,14 @@ uses, with no mocks and no hardware.
 # Run the app
 clojure -M:run
 
-# Tests (pure unit + jimfs/temp-dir integration)
+# Unit + hermetic tests
 clojure -M:test
 
+# Filesystem integration tests (NIO/Jimfs, SMB/Testcontainers, optional MTP hardware)
+clojure -M:integration
+
 # Lint and format
-clojure -M:clj-kondo --lint src dev test
+clojure -M:clj-kondo --lint src dev test test-integration
 clojure -M:cljfmt check        # or: clojure -M:cljfmt fix
 ```
 

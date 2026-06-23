@@ -43,9 +43,7 @@
   :outdated     {:deps      {com.github.liquidz/antq {:mvn/version "2.11.1276"}}
                  :main-opts ["-m" "antq.core"]}
 
-  ;; Unit + integration tests. jimfs provides a real in-memory java.nio
-  ;; FileSystem so the sync engine is exercised over the same NIO API that
-  ;; MTP uses — no mocks, no hardware.
+  ;; Unit + hermetic tests.
   :test
   {:extra-paths ["test"]
    :extra-deps  {io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}
@@ -53,14 +51,34 @@
    :main-opts   ["-m" "cognitect.test-runner"]
    :exec-fn     cognitect.test-runner.api/test}
 
+  ;; Integration tests against filesystem backends (test-integration/). Kept out
+  ;; of the default :test suite. `clojure -M:integration`. The NIO tests use jimfs
+  ;; for real in-memory FileSystem coverage; live backend tests skip unless their
+  ;; backend is available: SMB spins up Samba with Testcontainers (needs Docker),
+  ;; and MTP runs only when a real device is attached. CI (integration.yml) just
+  ;; runs this alias; SMB exercises on Linux, MTP skips without hardware.
+  ;; --enable-native-access is for melt-jfs's native MTP discovery (as in
+  ;; :run/:dev). Uses :main-opts (not :exec-fn) so cognitect.test-runner's -main
+  ;; calls System/exit — both to signal pass/fail to CI and to force the JVM down
+  ;; past any non-daemon threads a client leaves running (e.g. an open SMB
+  ;; FileSystem's jcifs connection threads).
+  :integration
+  {:extra-paths ["test-integration" "test"]
+   :extra-deps  {io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}
+                 com.google.jimfs/jimfs               {:mvn/version "1.3.1"}
+                 ;; Manages each backend's service container from a :once fixture.
+                 org.testcontainers/testcontainers     {:mvn/version "2.0.5"}}
+   :jvm-opts    ["--enable-native-access=ALL-UNNAMED"]
+   :main-opts   ["-m" "cognitect.test-runner" "-d" "test-integration"]}
+
   ;; Formatting.
   :cljfmt
-  {:extra-paths ["dev/src" "test"]
+  {:extra-paths ["dev/src" "test" "test-integration"]
    :extra-deps  {dev.weavejester/cljfmt {:mvn/version "0.16.4"}}
    :main-opts   ["-m" "cljfmt.main"]}
 
   ;; Linting.
   :clj-kondo
-  {:extra-paths ["dev/src" "test"]
+  {:extra-paths ["dev/src" "test" "test-integration"]
    :extra-deps  {clj-kondo/clj-kondo {:mvn/version "2026.05.25"}}
    :main-opts   ["-m" "clj-kondo.main"]}}}
