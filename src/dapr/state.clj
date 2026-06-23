@@ -23,7 +23,7 @@
    :plan           nil    ; {:actions [...] :summary {...}}
    :settings-open? false  ; whether the library-management modal is showing
    :editor         nil    ; library being added/edited, or nil
-   :browser        nil    ; folder browser, or nil — see browser-choose-file/-mtp
+   :browser        nil    ; folder browser, or nil
    :status         :idle  ; :idle :scanning :planned :syncing :done :error
    :scan-gen       0      ; bumped per scan; lets a new scan supersede a running one
    :progress       nil    ; {:done n :total t}
@@ -119,76 +119,37 @@
   (update-in state [:editor :roots] (fn [roots] (vec (remove #(= % uri) roots)))))
 
 ;; --- folder browser ----------------------------------------------------------
-;; A list+breadcrumb browser scoped to a single device. The device *type* is
-;; fixed up front when a library is created (the editor carries a :kind of :file,
-;; :mtp or :smb), so the browser opens straight into the right place: file:// drops
-;; into folder navigation (:phase :browse); mtp:// first picks one connected
-;; device (:phase :device); smb:// first enters a share URL + optional credentials
-;; (:phase :connect); each then navigates folders (:phase :browse). During :browse
-;; its :cwd is the directory currently shown; for file:// a nil :cwd means the
-;; top-level local "places" list, while for mtp:// :cwd starts at the chosen
-;; device root (kept in :device). :crumbs is the trail of {:label :uri} from that
-;; root down to :cwd; :entries is the list of child {:name :uri :dir?} maps to
-;; display. The actual directory listing (and device detection) is performed by
-;; the side-effecting layer (dapr.ui.events), which sets :loading? while it runs
-;; and then calls browser-set-entries/-devices.
+;; A list+breadcrumb browser scoped to a single device. The generic state shape is
+;; {:device/type :phase :device :cwd :crumbs :entries :loading?}, with device
+;; namespaces free to add fields for their own forms or chooser phases. During
+;; :browse, :cwd is the directory currently shown, :crumbs is the trail of
+;; {:label :uri} maps, and :entries is the list of child {:name :uri :dir?} maps.
 
-(defn browser-choose-file
-  "Open the folder browser straight into browsing local file:// places."
-  [state]
-  (assoc state :browser {:phase :browse :kind :file :device nil :devices []
-                         :cwd nil :crumbs [] :entries [] :loading? true}))
+(defn set-browser [state browser] (assoc state :browser browser))
 
-(defn browser-choose-mtp
-  "Open the folder browser at MTP device selection (devices loaded async)."
-  [state]
-  (assoc state :browser {:phase :device :kind :mtp :device nil :devices []
-                         :cwd nil :crumbs [] :entries [] :loading? true}))
-
-(defn browser-choose-smb
-  "Open the folder browser at the SMB connect form: the user enters the share URL
-  and optional credentials, then browses the share like an MTP device root."
-  [state]
-  (assoc state :browser {:phase :connect :kind :smb :device nil :devices []
-                         :url "smb://" :username "" :password "" :workgroup ""
-                         :cwd nil :crumbs [] :entries [] :loading? false}))
-
-(defn browser-connect-field
-  "Update one editable field (:url/:username/:password/:workgroup) of the SMB
-  connect form."
+(defn browser-field
+  "Update one editable field of the current browser."
   [state field value]
   (assoc-in state [:browser field] value))
 
-(defn browser-connect
-  "Leave the SMB connect form and start browsing the entered share `url`, recording
-  it as the browse root (kept in :device, like a chosen MTP device) so 'Places'
-  and the breadcrumbs return to the share root."
-  [state url]
+(defn browser-start-browse
+  "Enter the generic folder-browsing phase at `cwd`, recording `device` as the
+  root target for the breadcrumb root button."
+  [state {:keys [device cwd]}]
   (-> state
       (assoc-in [:browser :phase] :browse)
-      (assoc-in [:browser :device] {:name url :uri url})
-      (assoc-in [:browser :cwd] url)
+      (assoc-in [:browser :device] device)
+      (assoc-in [:browser :cwd] cwd)
       (assoc-in [:browser :crumbs] [])
       (assoc-in [:browser :entries] [])
       (assoc-in [:browser :loading?] true)))
 
 (defn browser-set-devices
-  "Record freshly detected MTP `devices` and clear the loading flag."
+  "Record freshly detected/available browser devices and clear the loading flag."
   [state devices]
   (-> state
       (assoc-in [:browser :devices] (vec devices))
       (assoc-in [:browser :loading?] false)))
-
-(defn browser-choose-device
-  "Pick MTP `device` ({:name :uri}) and start browsing at its root."
-  [state {:keys [name uri]}]
-  (-> state
-      (assoc-in [:browser :phase] :browse)
-      (assoc-in [:browser :device] {:name name :uri uri})
-      (assoc-in [:browser :cwd] uri)
-      (assoc-in [:browser :crumbs] [])
-      (assoc-in [:browser :entries] [])
-      (assoc-in [:browser :loading?] true)))
 
 (defn browser-close [state] (assoc state :browser nil))
 
@@ -210,8 +171,8 @@
       (assoc-in [:browser :loading?] true)))
 
 (defn browser-to-places
-  "Return to the browse root: the local places list for file://, or the chosen
-  device's root for mtp:// (whose URI is kept in :device)."
+  "Return to the browser root. A nil root URI means the device namespace will show
+  its top-level places list."
   [state]
   (-> state
       (assoc-in [:browser :cwd] (get-in state [:browser :device :uri]))

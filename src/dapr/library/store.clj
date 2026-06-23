@@ -4,17 +4,17 @@
   (all fns end in !)."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [clojure.pprint :as pprint])
+            [clojure.pprint :as pprint]
+            [dapr.fs.paths :as paths])
   (:import (java.io File PushbackReader)))
 
 (defn default-path!
   "OS-appropriate path to libraries.edn under the user's config directory
   ($XDG_CONFIG_HOME, %APPDATA%, or ~/.config)."
   ^File []
-  (let [home (System/getProperty "user.home")
-        base (or (System/getenv "XDG_CONFIG_HOME")
+  (let [base (or (System/getenv "XDG_CONFIG_HOME")
                  (System/getenv "APPDATA")
-                 (str home File/separator ".config"))]
+                 (io/file (paths/user-home) ".config"))]
     (io/file base "dapr" "libraries.edn")))
 
 (defn load!

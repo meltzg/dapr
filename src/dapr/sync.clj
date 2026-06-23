@@ -2,7 +2,8 @@
   "Side-effecting execution of a selective library sync. The plan is computed by
   the pure dapr.domain.plan; this namespace scans libraries, queries capacity,
   and performs the add/move/delete operations (all fns end in !)."
-  (:require [dapr.domain.library :as lib]
+  (:require [dapr.device.fs :as device-fs]
+            [dapr.domain.library :as lib]
             [dapr.domain.plan :as plan]
             [dapr.fs.nio :as nio]))
 
@@ -46,7 +47,7 @@
   Returns {:add n :delete n}."
   ([actions] (execute-plan! actions nil))
   ([actions {:keys [on-progress]}]
-   (let [resolve-root (memoize nio/root-path!)
+   (let [resolve-root (memoize device-fs/root-path!)
          todo  (remove (comp #{:skip :blocked} :op) actions)
          total (count todo)]
      (reduce

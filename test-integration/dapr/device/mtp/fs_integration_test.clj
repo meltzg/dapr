@@ -1,4 +1,4 @@
-(ns dapr.fs.mtp-integration-test
+(ns dapr.device.mtp.fs-integration-test
   "Integration tests for the mtp:// backend (melt-jfs + native libmtp) — the one
   thing neither the jimfs unit tests nor a container can cover, since it needs a
   real device. Part of the `clojure -M:integration` suite; runs only when an MTP
@@ -11,7 +11,8 @@
   (e.g. mtp://<vendor:product:serial>/<storage>/dapr-test/)."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [dapr.fs.mtp :as mtp]
+            [dapr.device.fs :as device-fs]
+            [dapr.device.mtp.fs :as mtp]
             [dapr.fs.nio :as nio])
   (:import (java.nio.file Files)
            (java.nio.file.attribute FileAttribute)))
@@ -37,7 +38,7 @@
   (if-not devices
     (skip "no MTP device attached")
     (testing "the device's storages list (read-only) and report capacity"
-      (let [storages (nio/dir-children! (:uri (first devices)))]
+      (let [storages (device-fs/dir-children! (:uri (first devices)))]
         (is (seq storages) "device should expose at least one storage")
         (is (every? :dir? storages))
         (is (<= 0 (nio/library-free! [(:uri (first storages))]))
@@ -55,11 +56,11 @@
               dir     (Files/createTempDirectory "mtp-it" (make-array FileAttribute 0))]
           (spit (str (.resolve dir rel)) content)
           (try
-            (nio/copy-file! (nio/root-path! (str (.toUri dir))) (nio/root-path! url) rel)
+            (nio/copy-file! (device-fs/root-path! (str (.toUri dir))) (device-fs/root-path! url) rel)
             (let [track (first (filter #(= rel (:rel %)) (nio/catalog! [url])))]
               (is (some? track) "copied track should be discovered by catalog!")
               (is (= (count (.getBytes ^String content)) (:size track))))
             (finally
-              (nio/delete-file! (nio/root-path! url) rel)))
+              (nio/delete-file! (device-fs/root-path! url) rel)))
           (is (not (some #(= rel (:rel %)) (nio/catalog! [url])))
               "track should be gone after delete-file!"))))))

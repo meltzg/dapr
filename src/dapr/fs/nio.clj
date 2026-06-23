@@ -1,42 +1,17 @@
 (ns dapr.fs.nio
   "Side-effecting filesystem adapter built purely on java.nio.file, so it works
-  unchanged across providers — the default file:// provider and the mtp://
-  provider supplied by melt-jfs. Pure data shaping lives in dapr.domain.*;
-  everything here performs I/O (all fns end in !)."
+  unchanged across providers once a device-specific namespace has resolved a root
+  URI to a Path. Pure data shaping lives in dapr.domain.*; everything here
+  performs I/O (all fns end in !)."
   (:require [clojure.string :as str]
-            [dapr.domain.library :as lib]
-            [dapr.fs.smb :as smb])
-  (:import (java.io File)
-           (java.net URI)
-           (java.nio.file CopyOption DirectoryStream FileStore
-                          FileSystemNotFoundException FileSystems
-                          Files LinkOption Path Paths StandardCopyOption)
+            [dapr.device.file.fs :as file-fs]
+            [dapr.device.fs :as device-fs]
+            [dapr.device.mtp.fs]
+            [dapr.device.smb.fs]
+            [dapr.domain.library :as lib])
+  (:import (java.nio.file CopyOption DirectoryStream FileStore
+                          Files LinkOption Path StandardCopyOption)
            (java.nio.file.attribute BasicFileAttributes FileAttribute)))
-
-(defn- ensure-filesystem!
-  "Ensure the (possibly non-default) filesystem addressed by `uri` is open,
-  opening it on demand. Returns the FileSystem."
-  [^URI uri]
-  (try
-    (FileSystems/getFileSystem uri)
-    (catch FileSystemNotFoundException _
-      (FileSystems/newFileSystem uri ^java.util.Map {}))))
-
-(defn root-path!
-  "Resolve a root URI string to the java.nio.file.Path of its directory, opening
-  a non-default filesystem (e.g. mtp://) on demand. smb:// is delegated to
-  dapr.fs.smb, which authenticates from the OS keystore and resolves the Path on
-  its own host-keyed FileSystem — Paths/get cannot be used there because smb-nio
-  caches FileSystems under a credential-bearing authority that the credential-free
-  root URI cannot reproduce."
-  ^Path [uri-str]
-  (let [uri    (URI. ^String uri-str)
-        scheme (str/lower-case (str (.getScheme uri)))]
-    (case scheme
-      "file" (Paths/get uri)
-      "smb"  (smb/root-path! uri-str)
-      (do (ensure-filesystem! uri)
-          (Paths/get uri)))))
 
 (defn- relative-key
   "Relative path of `p` under `root`, as a string with '/' separators (so paths
@@ -96,36 +71,42 @@
   ex-info carrying :dapr/abort, the whole walk unwinds (used to cancel a scan that
   a newer one has superseded)."
   [^Path root uri extensions on-scan]
-  (let [acc (java.util.ArrayList.)]
-    (letfn [(walk! [^Path dir]
-              (when on-scan (on-scan {:type :dir :rel (relative-key root dir)}))
-              (with-open [^DirectoryStream stream (Files/newDirectoryStream dir)]
-                ;; Realize the listing (one provider round-trip, as the old lazy
-                ;; doseq already incurred) so the child count is known up front and
-                ;; can drive overall scan progress.
-                (let [entries (vec (iterator-seq (.iterator stream)))]
-                  (when on-scan (on-scan {:type :listing :count (count entries)}))
-                  (doseq [^Path p entries]
-                    (when on-scan (on-scan {:type :entry}))
-                    (when-let [^BasicFileAttributes attrs
-                               (try (Files/readAttributes p BasicFileAttributes (make-array LinkOption 0))
-                                    (catch Exception _ nil))]
-                      (cond
-                        (.isDirectory attrs)
-                        ;; Skip a sub-directory that fails to open, but let an
-                        ;; on-scan abort (a superseded scan, carrying ex-data)
-                        ;; propagate.
-                        (try (walk! p)
-                             (catch Exception e
-                               (when (:dapr/abort (ex-data e)) (throw e))))
+  (letfn [(walk! [^Path dir]
+            (when on-scan (on-scan {:type :dir :rel (relative-key root dir)}))
+            (with-open [^DirectoryStream stream (Files/newDirectoryStream dir)]
+              ;; Realize the listing (one provider round-trip, as the old lazy
+              ;; doseq already incurred) so the child count is known up front and
+              ;; can drive overall scan progress.
+              (let [entries (vec (iterator-seq (.iterator stream)))]
+                (when on-scan (on-scan {:type :listing :count (count entries)}))
+                (reduce
+                 (fn [tracks ^Path p]
+                   (when on-scan (on-scan {:type :entry}))
+                   (if-let [^BasicFileAttributes attrs
+                            (try (Files/readAttributes p BasicFileAttributes (make-array LinkOption 0))
+                                 (catch Exception _ nil))]
+                     (cond
+                       (.isDirectory attrs)
+                       ;; Skip a sub-directory that fails to open, but let an
+                       ;; on-scan abort (a superseded scan, carrying ex-data)
+                       ;; propagate.
+                       (into tracks
+                             (try (walk! p)
+                                  (catch Exception e
+                                    (when (:dapr/abort (ex-data e)) (throw e))
+                                    [])))
 
-                        (and (.isRegularFile attrs)
-                             (lib/audio-file? (str (.getFileName p)) extensions))
-                        (let [track (audio-track root uri p attrs)]
-                          (.add acc track)
-                          (when on-scan (on-scan {:type :file :track track})))))))))]
-      (walk! root))
-    (vec acc)))
+                       (and (.isRegularFile attrs)
+                            (lib/audio-file? (str (.getFileName p)) extensions))
+                       (let [track (audio-track root uri p attrs)]
+                         (when on-scan (on-scan {:type :file :track track}))
+                         (conj tracks track))
+
+                       :else tracks)
+                     tracks))
+                 []
+                 entries))))]
+    (walk! root)))
 
 (defn catalog!
   "Scan every `root` URI of a library and return a seq of track maps for each
@@ -135,7 +116,7 @@
   ([roots] (catalog! roots nil))
   ([roots on-scan] (catalog! roots on-scan lib/default-audio-extensions))
   ([roots on-scan extensions]
-   (mapcat (fn [uri] (walk-audio-tracks! (root-path! uri) uri extensions on-scan)) roots)))
+   (mapcat (fn [uri] (walk-audio-tracks! (device-fs/root-path! uri) uri extensions on-scan)) roots)))
 
 (defn copy-file!
   "Copy file `rel-path` from `src-root` to `dst-root`, creating intermediate
@@ -163,7 +144,7 @@
   "Placement input for one root: {:uri :free-bytes} (usable space of its
   backing device)."
   [uri]
-  {:uri uri :free-bytes (.getUsableSpace (Files/getFileStore (root-path! uri)))})
+  {:uri uri :free-bytes (.getUsableSpace (Files/getFileStore (device-fs/root-path! uri)))})
 
 (defn library-free!
   "Total usable bytes across the distinct devices backing `roots`, so two roots
@@ -173,50 +154,16 @@
   two folders on one device (JDK local FileStores do not override equals)."
   [roots]
   (->> roots
-       (map (fn [uri] (Files/getFileStore (root-path! uri))))
+       (map (fn [uri] (Files/getFileStore (device-fs/root-path! uri))))
        (reduce (fn [acc ^FileStore fs]
                  (assoc acc [(.name fs) (.type fs)] (.getUsableSpace fs)))
                {})
        (vals)
        (reduce + 0)))
 
-(defn dir-children!
-  "Immediate sub-directories directly under `uri`, each as
-  {:name <file-name> :uri <child-uri-string> :dir? true}, sorted by name. Only
-  directories are returned — the folder browser navigates directories, while the
-  audio files inside them are discovered later by catalog!. Works unchanged
-  across providers (file://, mtp://) since both build child URIs via Path/toUri.
-
-  At an SMB server root (smb://host/) the entries are the host's shares, which
-  smb-nio reports with isDirectory=false; those are surfaced as navigable folders
-  so the browser can list shares, minus the hidden admin shares (IPC$, …)."
-  [uri]
-  (let [root        (root-path! uri)
-        smb-shares? (lib/smb-host-root? uri)
-        keep?       (fn [^Path p]
-                      (if smb-shares?
-                        (not (str/ends-with? (str (.getFileName p)) "$"))
-                        (Files/isDirectory p (make-array LinkOption 0))))]
-    (with-open [^DirectoryStream stream (Files/newDirectoryStream root)]
-      (->> (iterator-seq (.iterator stream))
-           (filter keep?)
-           (map (fn [^Path p]
-                  ;; Directory URIs end in '/': file:// and mtp:// already do; smb-nio
-                  ;; needs it so a re-entered child is treated as a folder, not a file.
-                  (let [u (str (.toUri p))]
-                    {:name  (str (.getFileName p))
-                     :uri   (if (str/ends-with? u "/") u (str u "/"))
-                     :dir?  true})))
-           (sort-by :name)
-           (vec)))))
-
 (defn local-places!
   "Top-level local browsing locations: each filesystem root plus the user's home
   directory, as {:name :uri :dir? true} entries. These seed the folder browser
-  alongside any connected MTP storages."
+  for local file:// libraries."
   []
-  (let [home  (File. (System/getProperty "user.home"))
-        entry (fn [^File f label] {:name label :uri (str (.toURI f)) :dir? true})]
-    (-> (mapv (fn [^File r] (entry r (str "Computer " (.getPath r))))
-              (File/listRoots))
-        (conj (entry home (str "Home " (.getPath home)))))))
+  (file-fs/local-places!))

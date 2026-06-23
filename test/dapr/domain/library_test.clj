@@ -5,25 +5,6 @@
 (defn- track [name size root rel]
   {:name name :size size :root root :rel rel})
 
-(deftest scheme-test
-  (testing "extracts and lowercases the scheme"
-    (is (= "file" (lib/scheme "file:///music")))
-    (is (= "mtp" (lib/scheme "MTP://1:2:abc/Storage")))
-    (is (= "smb" (lib/scheme "SMB://nas/Music/"))))
-  (testing "nil for non-strings or schemeless input"
-    (is (nil? (lib/scheme nil)))
-    (is (nil? (lib/scheme 42)))
-    (is (nil? (lib/scheme "/plain/path")))))
-
-(deftest supported-scheme?-test
-  (testing "file, mtp and smb are supported"
-    (is (true? (lib/supported-scheme? "file:///x")))
-    (is (true? (lib/supported-scheme? "mtp://1:2:a/S")))
-    (is (true? (lib/supported-scheme? "smb://nas/Music/"))))
-  (testing "other schemes are not"
-    (is (false? (lib/supported-scheme? "http://example.com")))
-    (is (false? (lib/supported-scheme? "/plain/path")))))
-
 (deftest library-valid?-test
   (testing "a named library whose roots share one device is valid"
     (is (true? (lib/library-valid? {:name "Music" :roots ["file:///a" "file:///b"]})))
@@ -42,33 +23,6 @@
   (testing "invalid when a root is a bare SMB host (no share chosen)"
     (is (false? (lib/library-valid? {:name "X" :roots ["smb://nas/"]})))
     (is (false? (lib/library-valid? {:name "X" :roots ["smb://nas"]})))))
-
-(deftest smb-host-root?-test
-  (testing "a bare SMB host is a share-less browse location"
-    (is (true? (lib/smb-host-root? "smb://nas/")))
-    (is (true? (lib/smb-host-root? "smb://nas"))))
-  (testing "a share (with or without sub-path) is not"
-    (is (false? (lib/smb-host-root? "smb://nas/Music/")))
-    (is (false? (lib/smb-host-root? "smb://nas/Music/sub/"))))
-  (testing "non-smb URIs are never host roots"
-    (is (false? (lib/smb-host-root? "file:///a")))
-    (is (false? (lib/smb-host-root? "mtp://1:2:a/S")))
-    (is (false? (lib/smb-host-root? nil)))))
-
-(deftest device-key-test
-  (testing "all file:// roots share one key, each MTP device gets its own"
-    (is (= "file" (lib/device-key "file:///music")))
-    (is (= "file" (lib/device-key "file:///other/disk")))
-    (is (= "mtp://1:2:a" (lib/device-key "mtp://1:2:a/SD/Music")))
-    (is (not= (lib/device-key "mtp://1:2:a/S") (lib/device-key "mtp://9:9:z/S"))))
-  (testing "each SMB share gets its own key, independent of sub-path"
-    (is (= "smb://nas/Music" (lib/device-key "smb://nas/Music/")))
-    (is (= "smb://nas/Music" (lib/device-key "smb://nas/Music/sub/dir/")))
-    (is (not= (lib/device-key "smb://nas/Music/") (lib/device-key "smb://nas/Photos/")))
-    (is (not= (lib/device-key "smb://nas/Music/") (lib/device-key "smb://other/Music/"))))
-  (testing "nil for unsupported or unparseable URIs"
-    (is (nil? (lib/device-key "http://x")))
-    (is (nil? (lib/device-key nil)))))
 
 (deftest root-addable?-test
   (testing "anything supported is addable to an empty library"
