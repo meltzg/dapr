@@ -68,7 +68,7 @@
   {:extra-paths ["test-integration"]
    :extra-deps  {io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}
                  ;; Manages each backend's service container from a :once fixture.
-                 org.testcontainers/testcontainers     {:mvn/version "1.21.4"}}
+                 org.testcontainers/testcontainers     {:mvn/version "2.0.5"}}
    :jvm-opts    ["--enable-native-access=ALL-UNNAMED"]
    :main-opts   ["-m" "cognitect.test-runner" "-d" "test-integration"]}
 
