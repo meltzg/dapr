@@ -1,6 +1,7 @@
 (ns dapr.device.file.fs
   "Local file:// device support."
-  (:require [dapr.device.fs :as dfs])
+  (:require [dapr.device.fs :as dfs]
+            [dapr.fs.paths :as paths])
   (:import (java.io File)
            (java.net URI)
            (java.nio.file Paths)))
@@ -15,7 +16,7 @@
   "Top-level local browsing locations: each filesystem root plus the user's home
   directory, as {:name :uri :dir? true} entries."
   []
-  (let [home  (File. (System/getProperty "user.home"))
+  (let [home  (paths/user-home)
         entry (fn [^File f label] {:name label :uri (str (.toURI f)) :dir? true})]
     (-> (mapv (fn [^File r] (entry r (str "Computer " (.getPath r))))
               (File/listRoots))
