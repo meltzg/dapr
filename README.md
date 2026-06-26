@@ -72,31 +72,6 @@ resources/config.edn  Integrant system map
 Libraries are persisted at `$XDG_CONFIG_HOME/dapr/libraries.edn` (fallback
 `~/.config/dapr/…`, `%APPDATA%\dapr\…` on Windows).
 
-## Best-practices conformance
-
-This project follows the team Clojure best-practices rule, scoped to a desktop
-app:
-
-| Rule | Status |
-| --- | --- |
-| Pure business logic; side effects isolated and named `!` | ✅ |
-| `deps.edn` / tools.deps (no Leiningen/Boot) | ✅ |
-| Threading-macro steps always wrapped in parens | ✅ |
-| `clj-kondo --lint src dev test` → zero warnings | ✅ |
-| `cljfmt check` → no diffs | ✅ |
-| Integrant for system lifecycle (no Component/Mount/global atoms) | ✅ |
-| Every pure namespace has a `clojure.test` `_test` counterpart | ✅ |
-| Side effects covered by integration tests against a **real** system, no mocks | ✅ (adapted, see below) |
-| reitit routing | ⛔ N/A — no HTTP layer |
-| shadow-cljs / ClojureScript | ⛔ N/A — JVM desktop app (cljfx/JavaFX) |
-
-**Adapted integration tests:** instead of Testcontainers + Postgres + a Ring
-handler, the effectful `fs`/`sync`/`store` layers are tested against *real
-filesystems* — Google [jimfs](https://github.com/google/jimfs) (in-memory) for
-low-level Path operations and real temp directories for the URI-driven
-catalog/sync/persistence path. This exercises the exact NIO code path that MTP
-uses, with no mocks and no hardware.
-
 ## Requirements
 
 - JDK 21+ (developed on JDK 25). JavaFX is pulled in explicitly (`org.openjfx`
@@ -130,32 +105,6 @@ clojure -M:dev
 (dev/reset)   ; reload changed code + restart
 (dev/halt)    ; stop
 ```
-
-### Enabling MTP
-
-`mtp://` support is gated behind the optional `:mtp` alias to keep native
-dependencies off the default/test classpath. Build the melt-jfs jar and run with
-the alias:
-
-```bash
-# In your melt-jfs checkout (sibling of this repo by default):
-./gradlew jar      # produces build/libs/melt-jfs.jar
-
-# Then run Dapr with MTP enabled:
-clojure -M:mtp:run
-```
-
-The `:mtp` alias points `:local/root` at `../melt-jfs/build/libs/melt-jfs.jar`
-(adjust the path in `deps.edn` if your checkout lives elsewhere) and adds
-`--enable-native-access=ALL-UNNAMED`. In the library editor, **Browse…** opens a
-folder browser (the same list+breadcrumb view used for local `file://` roots)
-whose top level lists local drives, your home directory, and each connected MTP
-device's storages — descend into any folder and pick it as a root. File
-copy/move/delete and capacity queries against `mtp://` URIs flow through the
-generic `dapr.fs.nio` code.
-
-> Note: tools.deps git deps don't work for melt-jfs — it's a Java/Gradle project
-> and tools.deps does not compile Java sources, so a built artifact is required.
 
 ## Roadmap
 
