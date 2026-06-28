@@ -20,6 +20,10 @@
   ;; from a java.io.File, so it only applies to the default filesystem provider —
   ;; smb:// and mtp:// tracks fall back to path-derived tags (see dapr.device.tag).
   net.jthink/jaudiotagger             {:mvn/version "3.0.1"}
+  ;; In-memory Datalog DB (Clojars) used as the persisted scan cache and the
+  ;; system of record for libraries. Snapshotted to an EDN file (see dapr.cache);
+  ;; pure-JVM, so it needs no extra native-access flags.
+  datascript/datascript               {:mvn/version "1.7.8"}
   ;; cljfx pins an early-access JavaFX 22; exclude it so we control the JavaFX
   ;; version ourselves and avoid two JavaFX versions on the classpath.
   cljfx/cljfx           {:mvn/version "1.10.8"

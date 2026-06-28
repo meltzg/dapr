@@ -1,3 +1,4 @@
-{:dapr/store    {}
- :dapr/state    {:store #ig/ref :dapr/store}
- :dapr/renderer {:state-atom #ig/ref :dapr/state}}
+{:dapr/cache    {}
+ :dapr/state    {:cache #ig/ref :dapr/cache}
+ :dapr/renderer {:state-atom #ig/ref :dapr/state
+                 :cache      #ig/ref :dapr/cache}}

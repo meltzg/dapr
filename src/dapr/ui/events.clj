@@ -1,25 +1,42 @@
 (ns dapr.ui.events
   "Side-effecting event handlers for the cljfx UI. Pure state transitions live in
-  dapr.state; filesystem work lives in dapr.fs.nio / dapr.sync; persistence in
-  dapr.library.store. Each handler runs on the JavaFX Application Thread, so
-  long-running scans/copies are dispatched to background threads to keep the UI
-  responsive."
-  (:require [dapr.device.events :as device-events]
+  dapr.state; filesystem work lives in dapr.fs.nio / dapr.sync; library and scan
+  persistence in dapr.cache. Each handler runs on the JavaFX Application Thread,
+  so long-running scans/copies are dispatched to background threads to keep the
+  UI responsive."
+  (:require [dapr.cache :as cache]
+            [dapr.device.events :as device-events]
             [dapr.device.file.events]
             [dapr.device.format :as device]
             [dapr.device.mtp.events]
             [dapr.device.smb.events]
             [dapr.domain.library :as lib]
             [dapr.domain.plan :as plan]
-            [dapr.library.store :as store]
             [dapr.state :as state]
             [dapr.sync :as sync]
-            [dapr.ui.format :as fmt])
+            [dapr.ui.format :as fmt]
+            [datascript.core :as d])
   (:import (javafx.application Platform)))
 
-(defn- persist! [state-atom]
-  (let [{:keys [store-path libraries]} @state-atom]
-    (when store-path (store/save! store-path libraries))))
+(defn- refresh-libraries!
+  "Re-read the library projection in state from the cache DB (the system of
+  record) after a mutation."
+  [state-atom conn]
+  (swap! state-atom state/set-libraries (cache/libraries (d/db conn))))
+
+(defn- error-summary
+  "A short one-line description of `t` for the status/error field — its message, or
+  its class name when it has none (e.g. a StackOverflowError)."
+  [^Throwable t]
+  (or (not-empty (.getMessage t)) (.getName (class t))))
+
+(defn- error-detail
+  "`t`'s full stack trace as a string, so a failure is captured in the activity log
+  (and not lost as a bare 'StackOverflowError' with a nil message)."
+  [^Throwable t]
+  (let [sw (java.io.StringWriter.)]
+    (.printStackTrace t (java.io.PrintWriter. sw))
+    (str sw)))
 
 (defn- scan-logger
   "Scan-event callback that appends progress to the activity log, tagged with the
@@ -90,72 +107,102 @@
       (scan-progress! state-atom prog ev)
       (log ev))))
 
-(defn- reload-catalogs!
-  "Re-scan the selected source and sink libraries and refresh catalogs +
-  capacity. Pre-selects tracks already on the sink (via state/set-catalogs).
-  Supersedes any scan still running from an earlier source/sink change."
-  [state-atom]
-  (let [superseded? (begin-scan! state-atom)
-        prog        (begin-progress! state-atom)
-        s           @state-atom
-        src         (state/library-by-id s (:source-id s))
-        snk         (state/library-by-id s (:sink-id s))]
-    (when (and src snk)
-      (swap! state-atom (fn [s] (-> s
-                                    (state/set-status :scanning)
-                                    (state/append-log (format "Scanning '%s' → '%s'…"
-                                                              (:name src) (:name snk))))))
-      (try
-        ;; Scan source and sink concurrently — melt-jfs serializes per device, so
-        ;; this overlaps work whenever they are on different devices (the common
-        ;; case: one local, one MTP) and is harmless when they share one. Both feed
-        ;; the one shared progress accumulator.
-        (let [src-fut (future (sync/catalog-of! src (scan-callback state-atom (:name src) superseded? prog)))
-              snk-cat (sync/catalog-of! snk (scan-callback state-atom (:name snk) superseded? prog))
-              src-cat @src-fut
-              free    (sync/library-free! snk)]
-          (when-not (superseded?)
-            (swap! state-atom
-                   (fn [s] (-> s
-                               (state/set-catalogs src-cat snk-cat free)
-                               (state/set-progress nil)
-                               (state/set-status :idle)
-                               (state/append-log (format "Source %d · Sink %d tracks · %s free."
-                                                         (count src-cat) (count snk-cat)
-                                                         (fmt/human-bytes free))))))))
-        (catch Throwable t
-          (when-not (superseded-ex? t)
-            (swap! state-atom (fn [s] (-> s
-                                          (state/set-error (.getMessage t))
-                                          (state/append-log (str "Scan failed: " (.getMessage t))))))))))))
+(defn- set-catalogs-from-cache!
+  "Replace the source/sink catalogs in state with the cache's current view (no
+  walk). Sink free space is the one uncached input, so it is read — a usable-space
+  query, not a walk. Pre-selects tracks already on the sink (state/set-catalogs)."
+  [state-atom conn src snk]
+  (swap! state-atom state/set-catalogs
+         (cache/library-catalog (d/db conn) (:id src))
+         (cache/library-catalog (d/db conn) (:id snk))
+         (sync/library-free! snk)))
 
-(defn- run-preview! [state-atom]
-  (let [superseded? (begin-scan! state-atom)
-        prog        (begin-progress! state-atom)
-        s           @state-atom
-        src         (state/library-by-id s (:source-id s))
-        snk         (state/library-by-id s (:sink-id s))]
+(defn- load-cached-catalogs!
+  "Instant first paint of the source/sink catalogs from the cache, before the
+  background refresh re-scans (see reload-catalogs!)."
+  [state-atom conn src snk]
+  (set-catalogs-from-cache! state-atom conn src snk)
+  (swap! state-atom state/append-log
+         (format "Loaded '%s' → '%s' from cache; refreshing…" (:name src) (:name snk))))
+
+(defn- reload-catalogs!
+  "Refresh the source/sink catalogs. First loads them instantly from the cache so
+  the table renders right away, then re-scans both libraries in the background
+  (reusing cached tags for unchanged files), updates the cache, and refreshes the
+  catalogs + capacity. Pre-selects tracks already on the sink (via
+  state/set-catalogs). Supersedes any refresh still running from an earlier
+  source/sink change."
+  [state-atom {:keys [conn path]}]
+  (let [s   @state-atom
+        src (state/library-by-id s (:source-id s))
+        snk (state/library-by-id s (:sink-id s))]
+    (when (and src snk)
+      (load-cached-catalogs! state-atom conn src snk)
+      (let [superseded? (begin-scan! state-atom)
+            prog        (begin-progress! state-atom)]
+        (swap! state-atom state/set-status :scanning)
+        (try
+          ;; Scan source and sink concurrently — melt-jfs serializes per device, so
+          ;; this overlaps work whenever they are on different devices (the common
+          ;; case: one local, one MTP) and is harmless when they share one. Both feed
+          ;; the one shared progress accumulator and reconcile their own cache entry.
+          (let [src-fut (future (sync/scan-into-cache! conn (:id src) src
+                                                       (scan-callback state-atom (:name src) superseded? prog)))
+                snk-cat (sync/scan-into-cache! conn (:id snk) snk
+                                               (scan-callback state-atom (:name snk) superseded? prog))
+                src-cat @src-fut
+                free    (sync/library-free! snk)]
+            (cache/snapshot! conn path)
+            (when-not (superseded?)
+              (swap! state-atom
+                     (fn [s] (-> s
+                                 (state/set-catalogs src-cat snk-cat free)
+                                 (state/set-progress nil)
+                                 (state/set-status :idle)
+                                 (state/append-log (format "Source %d · Sink %d tracks · %s free."
+                                                           (count src-cat) (count snk-cat)
+                                                           (fmt/human-bytes free))))))))
+          (catch Throwable t
+            (when-not (superseded-ex? t)
+              (swap! state-atom (fn [s] (-> s
+                                            (state/set-error (error-summary t))
+                                            (state/append-log (str "Scan failed: " (error-summary t)))
+                                            (state/append-log (error-detail t))))))))))))
+
+(defn- run-preview!
+  "Compute the selection plan and move to :planned. Reuses the catalogs already
+  scanned into state when the source/sink were chosen (see reload-catalogs!), so
+  previewing doesn't re-walk the libraries — only the sink's per-root free space
+  is re-read, which is cheap. Falls back to a fresh scan only if a catalog is
+  empty (e.g. the selection scan is still in flight)."
+  [state-atom]
+  (let [{:keys [source-catalog sink-catalog selected] :as s} @state-atom
+        src (state/library-by-id s (:source-id s))
+        snk (state/library-by-id s (:sink-id s))]
     (swap! state-atom (fn [s] (-> s
                                   (state/set-status :scanning)
                                   (state/append-log "Computing plan…"))))
     (try
-      (let [actions (sync/build-plan! src snk (:selected s)
-                                      {:on-source (scan-callback state-atom (:name src) superseded? prog)
-                                       :on-sink   (scan-callback state-atom (:name snk) superseded? prog)})
+      (let [actions (if (and (seq source-catalog) (seq sink-catalog))
+                      (plan/selection-plan {:source-catalog source-catalog
+                                            :sink-catalog   sink-catalog
+                                            :selected       selected
+                                            :sink-roots     (sync/sink-roots! snk)})
+                      (sync/build-plan! src snk selected))
             summ    (plan/summary actions)]
-        (when-not (superseded?)
-          (swap! state-atom (fn [s] (-> s
-                                        (state/set-plan actions summ)
-                                        (state/set-progress nil)
-                                        (state/append-log (fmt/plan-summary-text summ)))))))
+        (swap! state-atom (fn [s] (-> s
+                                      (state/set-plan actions summ)
+                                      (state/set-progress nil)
+                                      (state/append-log (fmt/plan-summary-text summ))))))
       (catch Throwable t
-        (when-not (superseded-ex? t)
-          (swap! state-atom (fn [s] (-> s
-                                        (state/set-error (.getMessage t))
-                                        (state/append-log (str "Plan failed: " (.getMessage t)))))))))))
+        (swap! state-atom (fn [s] (-> s
+                                      (state/set-error (error-summary t))
+                                      (state/append-log (str "Plan failed: " (error-summary t)))
+                                      (state/append-log (error-detail t)))))))))
 
-(defn- run-sync! [state-atom]
-  (let [actions (get-in @state-atom [:plan :actions])]
+(defn- run-sync! [state-atom {:keys [conn path]}]
+  (let [{:keys [source-catalog source-id sink-id] :as s0} @state-atom
+        actions (get-in s0 [:plan :actions])]
     (swap! state-atom (fn [s] (-> s
                                   (state/set-status :syncing)
                                   (state/append-log "Syncing…"))))
@@ -164,17 +211,25 @@
                     actions
                     {:on-progress (fn [p] (swap! state-atom state/set-progress
                                                  (select-keys p [:done :total])))})]
+        ;; Update the sink's cache entry directly from the executed plan, so a
+        ;; sync needs no re-walk; then refresh the catalogs from the cache.
+        (sync/apply-plan-to-cache! conn sink-id source-catalog actions)
+        (cache/snapshot! conn path)
+        (let [s   @state-atom
+              src (state/library-by-id s source-id)
+              snk (state/library-by-id s sink-id)]
+          (when (and src snk) (set-catalogs-from-cache! state-atom conn src snk)))
         (swap! state-atom (fn [s] (-> s
                                       (state/set-status :done)
                                       (state/set-progress nil)
                                       (state/append-log
                                        (format "Done. Added %d, deleted %d."
-                                               (:add result) (:delete result))))))
-        (reload-catalogs! state-atom))
+                                               (:add result) (:delete result)))))))
       (catch Throwable t
         (swap! state-atom (fn [s] (-> s
-                                      (state/set-error (.getMessage t))
-                                      (state/append-log (str "Sync failed: " (.getMessage t))))))))))
+                                      (state/set-error (error-summary t))
+                                      (state/append-log (str "Sync failed: " (error-summary t)))
+                                      (state/append-log (error-detail t)))))))))
 
 (def ^:private mixed-device-msg
   "A library's roots must all live on one device — remove the existing roots first to switch device.")
@@ -183,8 +238,9 @@
   (:id (first (filter #(= nm (:name %)) (:libraries @state-atom)))))
 
 (defn make-handler
-  "Return a cljfx event handler closing over `state-atom`."
-  [state-atom]
+  "Return a cljfx event handler closing over `state-atom` and the `cache`
+  component {:conn :path} that owns library/scan persistence."
+  [state-atom {:keys [conn] :as cache}]
   (fn [event]
     (case (:event/type event)
       ;; settings modal
@@ -195,13 +251,15 @@
       ;; pins the new library to file://, mtp:// or smb:// (editing derives it from
       ;; the existing roots)
       ::library-new    (swap! state-atom state/set-editor
-                              {:id (str (random-uuid)) :name "" :roots []
+                              {:id nil :name "" :roots []
                                :device/type (:device/type event)})
       ::library-edit   (when-let [l (state/library-by-id @state-atom (:id event))]
                          (swap! state-atom state/set-editor
                                 (assoc l :device/type (device/device-type (first (:roots l))))))
-      ::library-delete (do (swap! state-atom state/delete-library (:id event))
-                           (persist! state-atom))
+      ::library-delete (do (cache/delete-library! conn (:id event))
+                           (cache/snapshot! conn (:path cache))
+                           (swap! state-atom state/delete-library (:id event))
+                           (refresh-libraries! state-atom conn))
 
       ;; editor
       ::editor-name        (swap! state-atom state/editor-name (:fx/event event))
@@ -238,8 +296,10 @@
       ::editor-save
       (let [library (select-keys (:editor @state-atom) [:id :name :roots])]
         (if (lib/library-valid? library)
-          (do (swap! state-atom (fn [s] (-> s (state/upsert-library library) (state/cancel-editor))))
-              (persist! state-atom))
+          (do (cache/upsert-library! conn library)
+              (cache/snapshot! conn (:path cache))
+              (refresh-libraries! state-atom conn)
+              (swap! state-atom state/cancel-editor))
           (swap! state-atom state/append-log
                  "Library needs a name and at least one file://, mtp:// or smb:// root.")))
       ::editor-cancel (swap! state-atom state/cancel-editor)
@@ -247,12 +307,12 @@
       ;; sync workflow
       ::select-source (do (swap! state-atom state/select-source
                                  (library-id-by-name state-atom (:fx/event event)))
-                          (future (reload-catalogs! state-atom)))
+                          (future (reload-catalogs! state-atom cache)))
       ::select-sink   (do (swap! state-atom state/select-sink
                                  (library-id-by-name state-atom (:fx/event event)))
-                          (future (reload-catalogs! state-atom)))
+                          (future (reload-catalogs! state-atom cache)))
       ::toggle-track  (swap! state-atom state/toggle-track (:key event))
       ::preview       (future (run-preview! state-atom))
-      ::sync          (future (run-sync! state-atom))
+      ::sync          (future (run-sync! state-atom cache))
       ::quit          (do (Platform/exit) (System/exit 0))
       nil)))

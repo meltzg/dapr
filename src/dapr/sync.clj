@@ -2,10 +2,12 @@
   "Side-effecting execution of a selective library sync. The plan is computed by
   the pure dapr.domain.plan; this namespace scans libraries, queries capacity,
   and performs the add/move/delete operations (all fns end in !)."
-  (:require [dapr.device.fs :as device-fs]
+  (:require [dapr.cache :as cache]
+            [dapr.device.fs :as device-fs]
             [dapr.domain.library :as lib]
             [dapr.domain.plan :as plan]
-            [dapr.fs.nio :as nio]))
+            [dapr.fs.nio :as nio]
+            [datascript.core :as d]))
 
 (defn catalog-of!
   "Scan a library's roots into a catalog (key -> track). When `on-scan` is
@@ -13,6 +15,42 @@
   ([library] (catalog-of! library nil))
   ([{:keys [roots]} on-scan]
    (lib/catalog (nio/catalog! roots on-scan))))
+
+(defn scan-into-cache!
+  "Scan `library` and reconcile the cache: reuse cached tags for unchanged files
+  (keyed off the library's current cached catalog), replace its tracks/presences
+  in the cache `conn` under library entity `lib-eid`, and return its freshly
+  scanned catalog (key -> track). When supplied, `on-scan` receives per-directory
+  and per-file scan events."
+  ([conn lib-eid library] (scan-into-cache! conn lib-eid library nil))
+  ([conn lib-eid library on-scan]
+   (let [known-cat (cache/library-catalog (d/db conn) lib-eid)
+         known     (fn [rel size] (get known-cat [rel size]))
+         tracks    (nio/catalog! (:roots library) on-scan lib/default-audio-extensions known)]
+     ;; Reuse the catalog we already queried so the cache diff doesn't re-query it.
+     (cache/replace-library-tracks! conn lib-eid tracks known-cat)
+     (lib/catalog tracks))))
+
+(defn apply-plan-to-cache!
+  "Reflect an executed selection plan in the sink's cache entry under library
+  entity `sink-id`: add a presence (carrying the source's tags from
+  `source-catalog`) for each :add action and drop one for each :delete, so the
+  cache stays correct without re-walking the sink. Added presences omit mtime (the
+  freshly copied files have new mtimes not stat'd here), so a later sink scan
+  simply re-reads those few tags. :skip/:blocked actions are ignored."
+  [conn sink-id source-catalog actions]
+  (doseq [a actions]
+    (case (:op a)
+      :add    (let [t (get source-catalog (:key a))]
+                (cache/add-presence! conn sink-id
+                                     {:rel    (get-in a [:target :rel])
+                                      :size   (:size a)
+                                      :root   (get-in a [:target :root])
+                                      :artist (:artist t)
+                                      :album  (:album t)
+                                      :title  (:title t)}))
+      :delete (cache/remove-presence! conn sink-id (get-in a [:at :rel]) (:size a))
+      nil)))
 
 (defn sink-roots!
   "Per-root free space for a sink library, in library order (placement input)."
