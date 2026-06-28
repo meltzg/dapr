@@ -46,14 +46,6 @@
   [{:keys [used budget]}]
   (boolean (and used budget (> used budget))))
 
-(defn track-row-label
-  "Label for one track row: name, size, and where it currently lives on the
-  sink (if anywhere)."
-  [{:keys [name size]} sink-track]
-  (str name
-       "  (" (human-bytes size) ")"
-       (when sink-track (str "  — on sink: " (:rel sink-track)))))
-
 (defn plan-summary-text
   "Render a plan summary (see dapr.domain.plan/summary) as a one-liner."
   [summary]

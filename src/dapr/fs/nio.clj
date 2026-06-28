@@ -5,9 +5,13 @@
   performs I/O (all fns end in !)."
   (:require [clojure.string :as str]
             [dapr.device.file.fs :as file-fs]
+            ;; Loaded for their tags! method registrations; file:// reads embedded
+            ;; tags, the rest fall back to dapr.device.tag's path-based default.
+            [dapr.device.file.tag]
             [dapr.device.fs :as device-fs]
             [dapr.device.mtp.fs]
             [dapr.device.smb.fs]
+            [dapr.device.tag :as device-tag]
             [dapr.domain.library :as lib])
   (:import (java.nio.file CopyOption DirectoryStream FileStore
                           Files LinkOption Path StandardCopyOption)
@@ -38,14 +42,17 @@
 
 (defn- audio-track
   "Build a track map for audio file `p` (Path) under root `uri` (Path `root`)
-  from the already-read `attrs`."
+  from the already-read `attrs`, enriched with its artist/album/title tags
+  (embedded for file://, path-derived elsewhere — see dapr.device.tag)."
   [^Path root uri ^Path p ^BasicFileAttributes attrs]
   (let [m {:name  (str (.getFileName p))
            :size  (.size attrs)
            :mtime (.toMillis (.lastModifiedTime attrs))
            :root  uri
            :rel   (relative-key root p)}]
-    (assoc m :key (lib/track-key m))))
+    (-> m
+        (merge (device-tag/tags! m p))
+        (assoc :key (lib/track-key m)))))
 
 (defn- walk-audio-tracks!
   "Depth-first walk of `root`, collecting a track map for every audio file. Opens
