@@ -40,18 +40,30 @@
             root
             (map-indexed vector segs))))
 
+(defn- track-tags!
+  "Artist/album/title for the audio file at `p` described by `m`. Reuses tags from
+  the `known` lookup (rel size -> cached track) when it has an entry for this
+  [rel size] with the same mtime — so an unchanged file is not re-read, which is
+  the expensive part over MTP/SMB; otherwise reads them via the device tag reader."
+  [known {:keys [rel size mtime] :as m} ^Path p]
+  (let [cached (when known (known rel size))]
+    (if (and cached (= mtime (:mtime cached)))
+      (select-keys cached [:artist :album :title])
+      (device-tag/tags! m p))))
+
 (defn- audio-track
   "Build a track map for audio file `p` (Path) under root `uri` (Path `root`)
   from the already-read `attrs`, enriched with its artist/album/title tags
-  (embedded for file://, path-derived elsewhere — see dapr.device.tag)."
-  [^Path root uri ^Path p ^BasicFileAttributes attrs]
+  (embedded for file://, path-derived elsewhere — see dapr.device.tag; reused
+  from `known` when unchanged — see track-tags!)."
+  [^Path root uri ^Path p ^BasicFileAttributes attrs known]
   (let [m {:name  (str (.getFileName p))
            :size  (.size attrs)
            :mtime (.toMillis (.lastModifiedTime attrs))
            :root  uri
            :rel   (relative-key root p)}]
     (-> m
-        (merge (device-tag/tags! m p))
+        (merge (track-tags! known m p))
         (assoc :key (lib/track-key m)))))
 
 (defn- walk-audio-tracks!
@@ -79,8 +91,9 @@
   Entries that fail to stat, and sub-directories that fail to open, are skipped
   (matching Files/walkFileTree's visitFileFailed=CONTINUE). If `on-scan` throws an
   ex-info carrying :dapr/abort, the whole walk unwinds (used to cancel a scan that
-  a newer one has superseded)."
-  [^Path root uri extensions on-scan]
+  a newer one has superseded). `known` (rel size -> cached track), when supplied,
+  lets unchanged files reuse their cached tags (see track-tags!)."
+  [^Path root uri extensions on-scan known]
   (loop [stack  [root]
          tracks []]
     (if (empty? stack)
@@ -111,7 +124,7 @@
 
                          (and (.isRegularFile attrs)
                               (lib/audio-file? (str (.getFileName p)) extensions))
-                         (let [track (audio-track root uri p attrs)]
+                         (let [track (audio-track root uri p attrs known)]
                            (when on-scan (on-scan {:type :file :track track}))
                            (update acc 1 conj track))
 
@@ -129,11 +142,14 @@
   "Scan every `root` URI of a library and return a seq of track maps for each
   audio file, tagged with the :root it lives under and its :rel path. `on-scan`,
   when supplied, receives per-directory and per-file scan events (see
-  walk-audio-tracks!) for progress reporting and diagnostics."
+  walk-audio-tracks!) for progress reporting and diagnostics. `known` (rel size ->
+  cached track), when supplied, lets unchanged files reuse their cached tags
+  instead of re-reading them (see walk-audio-tracks!)."
   ([roots] (catalog! roots nil))
   ([roots on-scan] (catalog! roots on-scan lib/default-audio-extensions))
-  ([roots on-scan extensions]
-   (mapcat (fn [uri] (walk-audio-tracks! (device-fs/root-path! uri) uri extensions on-scan)) roots)))
+  ([roots on-scan extensions] (catalog! roots on-scan extensions nil))
+  ([roots on-scan extensions known]
+   (mapcat (fn [uri] (walk-audio-tracks! (device-fs/root-path! uri) uri extensions on-scan known)) roots)))
 
 (defn copy-file!
   "Copy file `rel-path` from `src-root` to `dst-root`, creating intermediate

@@ -5,10 +5,12 @@
   conventions from the backend best-practices do not apply.)"
   (:require [cljfx.api :as fx]
             [clojure.java.io :as io]
+            [dapr.cache :as cache]
             [dapr.library.store :as store]
             [dapr.state :as state]
             [dapr.ui.events :as events]
             [dapr.ui.views :as views]
+            [datascript.core :as d]
             [integrant.core :as ig]))
 
 (defn config
@@ -18,20 +20,30 @@
       (slurp)
       (ig/read-string)))
 
-(defmethod ig/init-key :dapr/store [_ _]
-  {:path (store/default-path!)})
+(defmethod ig/init-key :dapr/cache [_ _]
+  (let [path   (cache/default-path!)
+        conn   (cache/load! path)
+        legacy (store/default-path!)]
+    ;; First run on an existing install: import libraries.edn into the DB (which
+    ;; then becomes the system of record) and persist the import.
+    (when (and (empty? (cache/libraries (d/db conn))) (.exists (io/file legacy)))
+      (cache/migrate-from-edn! conn (store/load! legacy))
+      (cache/snapshot! conn path))
+    {:conn conn :path path}))
 
-(defmethod ig/init-key :dapr/state [_ {:keys [store]}]
-  (let [path (:path store)]
-    (atom (-> state/initial-state
-              (assoc :store-path path)
-              (state/set-libraries (store/load! path))))))
+(defmethod ig/halt-key! :dapr/cache [_ {:keys [conn path]}]
+  (when (and conn path)
+    (cache/snapshot! conn path)))
+
+(defmethod ig/init-key :dapr/state [_ {:keys [cache]}]
+  (atom (-> state/initial-state
+            (state/set-libraries (cache/libraries (d/db (:conn cache)))))))
 
 (defmethod ig/halt-key! :dapr/state [_ state-atom]
   (reset! state-atom state/initial-state))
 
-(defmethod ig/init-key :dapr/renderer [_ {:keys [state-atom]}]
-  (let [handler  (events/make-handler state-atom)
+(defmethod ig/init-key :dapr/renderer [_ {:keys [state-atom cache]}]
+  (let [handler  (events/make-handler state-atom cache)
         renderer (fx/create-renderer
                   :middleware (fx/wrap-map-desc (fn [s] (views/root-view s)))
                   :opts {:fx.opt/map-event-handler handler})]
