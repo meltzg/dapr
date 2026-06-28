@@ -18,7 +18,7 @@
   their tags read (vs reused). Returns {:tracks :reads}."
   [root uri known]
   (let [reads (atom 0)]
-    (with-redefs [device-tag/tags! (fn [_m _p] (swap! reads inc) {:artist "read" :album nil :title nil})]
+    (with-redefs [device-tag/tags! (fn [_m _p] (swap! reads inc) {:artist "read" :album nil :title nil :source :embedded})]
       {:tracks (walk! root uri lib/default-audio-extensions nil known)
        :reads  @reads})))
 
