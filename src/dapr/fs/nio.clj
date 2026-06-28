@@ -55,21 +55,24 @@
         (assoc :key (lib/track-key m)))))
 
 (defn- walk-audio-tracks!
-  "Depth-first walk of `root`, collecting a track map for every audio file. Opens
-  each directory's stream explicitly (rather than via Files/walkFileTree) so that
-  `on-scan` is notified *before* the per-directory listing call -- which over MTP
-  is a single blocking native round-trip -- making it possible to pinpoint a
-  directory whose listing hangs (the last :dir event before the freeze names it).
-  Reads one attribute set per entry, the same as Files/walkFileTree would.
+  "Depth-first walk of `root`, collecting a track map for every audio file. Driven
+  by an explicit work stack of directories rather than call-stack recursion, so an
+  arbitrarily deep tree (or a symlink/junction cycle on a share, which gets no OS
+  ELOOP protection) can't overflow the JVM stack. Opens each directory's stream
+  explicitly (rather than via Files/walkFileTree) and notifies `on-scan` *before*
+  the per-directory listing call -- which over MTP is a single blocking native
+  round-trip -- making it possible to pinpoint a directory whose listing hangs (the
+  last :dir event before the freeze names it). Reads one attribute set per entry,
+  the same as Files/walkFileTree would.
 
   `on-scan`, when supplied, is called with:
-    {:type :dir     :rel <dir rel path>} as each directory is *entered*, before its
+    {:type :dir     :rel <dir rel path>} as each directory is *visited*, before its
                                          listing call (so the last :dir before a
                                          freeze names the directory whose listing
                                          hung over MTP);
     {:type :listing :count <n>}          once that directory's children are listed,
                                          so progress totals can grow as the walk
-                                         recurses (n is its immediate child count);
+                                         descends (n is its immediate child count);
     {:type :entry}                       for every child visited, advancing the
                                          done count toward the total;
     {:type :file    :track <track map>}  for each audio file found.
@@ -78,42 +81,49 @@
   ex-info carrying :dapr/abort, the whole walk unwinds (used to cancel a scan that
   a newer one has superseded)."
   [^Path root uri extensions on-scan]
-  (letfn [(walk! [^Path dir]
-            (when on-scan (on-scan {:type :dir :rel (relative-key root dir)}))
-            (with-open [^DirectoryStream stream (Files/newDirectoryStream dir)]
-              ;; Realize the listing (one provider round-trip, as the old lazy
-              ;; doseq already incurred) so the child count is known up front and
-              ;; can drive overall scan progress.
-              (let [entries (vec (iterator-seq (.iterator stream)))]
-                (when on-scan (on-scan {:type :listing :count (count entries)}))
-                (reduce
-                 (fn [tracks ^Path p]
-                   (when on-scan (on-scan {:type :entry}))
-                   (if-let [^BasicFileAttributes attrs
-                            (try (Files/readAttributes p BasicFileAttributes (make-array LinkOption 0))
-                                 (catch Exception _ nil))]
-                     (cond
-                       (.isDirectory attrs)
-                       ;; Skip a sub-directory that fails to open, but let an
-                       ;; on-scan abort (a superseded scan, carrying ex-data)
-                       ;; propagate.
-                       (into tracks
-                             (try (walk! p)
-                                  (catch Exception e
-                                    (when (:dapr/abort (ex-data e)) (throw e))
-                                    [])))
+  (loop [stack  [root]
+         tracks []]
+    (if (empty? stack)
+      tracks
+      (let [^Path dir (peek stack)
+            stack     (pop stack)]
+        (when on-scan (on-scan {:type :dir :rel (relative-key root dir)}))
+        ;; List the directory (closing its stream before descending, so we never
+        ;; hold a handle open per ancestor). A directory that fails to open is
+        ;; skipped; on-scan's :dapr/abort is raised outside this try, so it still
+        ;; unwinds the whole walk.
+        (if-let [entries (try
+                           (with-open [^DirectoryStream stream (Files/newDirectoryStream dir)]
+                             (vec (iterator-seq (.iterator stream))))
+                           (catch Exception _ nil))]
+          (do
+            (when on-scan (on-scan {:type :listing :count (count entries)}))
+            (let [[child-dirs new-tracks]
+                  (reduce
+                   (fn [acc ^Path p]
+                     (when on-scan (on-scan {:type :entry}))
+                     (if-let [^BasicFileAttributes attrs
+                              (try (Files/readAttributes p BasicFileAttributes (make-array LinkOption 0))
+                                   (catch Exception _ nil))]
+                       (cond
+                         (.isDirectory attrs)
+                         (update acc 0 conj p)
 
-                       (and (.isRegularFile attrs)
-                            (lib/audio-file? (str (.getFileName p)) extensions))
-                       (let [track (audio-track root uri p attrs)]
-                         (when on-scan (on-scan {:type :file :track track}))
-                         (conj tracks track))
+                         (and (.isRegularFile attrs)
+                              (lib/audio-file? (str (.getFileName p)) extensions))
+                         (let [track (audio-track root uri p attrs)]
+                           (when on-scan (on-scan {:type :file :track track}))
+                           (update acc 1 conj track))
 
-                       :else tracks)
-                     tracks))
-                 []
-                 entries))))]
-    (walk! root)))
+                         :else acc)
+                       acc))
+                   [[] []]
+                   entries)]
+              ;; Push children reversed so the first child is popped first (DFS in
+              ;; directory order).
+              (recur (into stack (rseq child-dirs))
+                     (into tracks new-tracks))))
+          (recur stack tracks))))))
 
 (defn catalog!
   "Scan every `root` URI of a library and return a seq of track maps for each
