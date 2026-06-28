@@ -71,14 +71,16 @@
    :jvm-opts    ["--enable-native-access=ALL-UNNAMED"]
    :main-opts   ["-m" "cognitect.test-runner" "-d" "test-integration"]}
 
-  ;; Formatting.
+  ;; Formatting. dev/src is kept off the classpath (lint/format it by passing it as
+  ;; a path arg) so Clojure doesn't auto-load dev/src/user.clj — whose integrant.repl
+  ;; require isn't on this alias — at startup.
   :cljfmt
-  {:extra-paths ["dev/src" "test" "test-integration"]
+  {:extra-paths ["test" "test-integration"]
    :extra-deps  {dev.weavejester/cljfmt {:mvn/version "0.16.4"}}
    :main-opts   ["-m" "cljfmt.main"]}
 
-  ;; Linting.
+  ;; Linting. dev/src kept off the classpath for the same reason as :cljfmt above.
   :clj-kondo
-  {:extra-paths ["dev/src" "test" "test-integration"]
+  {:extra-paths ["test" "test-integration"]
    :extra-deps  {clj-kondo/clj-kondo {:mvn/version "2026.05.25"}}
    :main-opts   ["-m" "clj-kondo.main"]}}}

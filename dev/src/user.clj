@@ -1,4 +1,4 @@
-(ns dev
+(ns user
   "REPL workflow helpers (Integrant). Start the app with (go), reload changed
   namespaces and restart with (reset), and stop it with (halt)."
   (:require [integrant.repl :as ig-repl]
