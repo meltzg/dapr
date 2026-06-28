@@ -51,12 +51,21 @@
   (d/create-conn schema))
 
 (defn- backup-corrupt!
-  "Move an unreadable/old snapshot aside so it isn't overwritten, preserving any
-  authoritative library data for manual recovery."
+  "Best-effort: move an unreadable/old snapshot aside so it isn't later overwritten
+  by snapshot!, preserving any authoritative library data for manual recovery.
+  Uses java.nio Files/move (which surfaces a failure as an exception) rather than
+  File#renameTo (which silently returns false); a failure is logged and swallowed
+  so it can't crash startup. Returns the backup path, or nil if the move failed."
   [^File f]
   (let [dst (io/file (str (.getPath f) ".corrupt-" (System/currentTimeMillis)))]
-    (.renameTo f dst)
-    dst))
+    (try
+      (Files/move (.toPath f) (.toPath dst)
+                  (into-array CopyOption [StandardCopyOption/REPLACE_EXISTING]))
+      dst
+      (catch Exception e
+        (binding [*out* *err*]
+          (println "dapr.cache: could not back up corrupt snapshot" (str f) "—" (.getMessage e)))
+        nil))))
 
 (defn load!
   "Read the snapshot at `path` into a connection. A missing file yields an empty

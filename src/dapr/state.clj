@@ -63,15 +63,27 @@
 (defn- recompute-capacity [{:keys [selected source-catalog sink-catalog free-bytes] :as state}]
   (assoc state :capacity (cap/usage selected source-catalog sink-catalog free-bytes)))
 
+(defn- invalidate-plan
+  "Drop any computed plan and return to :idle. Used when the source/sink changes,
+  so a plan built for the previous pair can't be synced (it would otherwise stay
+  :planned — and Sync enabled — until the background reload runs)."
+  [state]
+  (assoc state :plan nil :status :idle))
+
 (defn select-source
   "Choose the source library, clearing the column-browser filter and searches so
-  they start fresh for the new library's tags."
+  they start fresh for the new library's tags, and invalidating any stale plan."
   [state id]
-  (assoc state :source-id id
-         :filter {:artist nil :album nil}
-         :filter-search {:artist "" :album ""}))
+  (-> state
+      (assoc :source-id id
+             :filter {:artist nil :album nil}
+             :filter-search {:artist "" :album ""})
+      (invalidate-plan)))
 
-(defn select-sink [state id] (assoc state :sink-id id))
+(defn select-sink
+  "Choose the sink library, invalidating any plan built for the previous pair."
+  [state id]
+  (-> state (assoc :sink-id id) (invalidate-plan)))
 
 (defn set-filter-artist
   "Set the column-browser artist filter (nil = All), clearing the album filter
