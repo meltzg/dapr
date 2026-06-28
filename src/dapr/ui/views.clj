@@ -101,41 +101,83 @@
               {:fx/type :label :text (fmt/capacity-text capacity)
                :style (if (fmt/over-capacity? capacity) "-fx-text-fill: red;" "")}]})
 
-(defn- track-items
+(defn- track-rows
   "Resolve the source catalog into a sorted vector of row maps for the track
-  list, one per track: {:key :label :on? :disable}. Capacity is checked in
-  constant time per row against the selection's remaining free bytes (computed
-  once from :capacity), so this stays O(n) even for libraries of many thousands
-  of tracks — see dapr.domain.capacity/row-fits?."
+  table, one per track: {:key :artist :album :title :size :sink-rel :on? :disable}.
+  Rows sort by artist/album/title (the table lets the user re-sort by any column).
+  Capacity is checked in constant time per row against the selection's remaining
+  free bytes (computed once from :capacity), so this stays O(n) even for libraries
+  of many thousands of tracks — see dapr.domain.capacity/row-fits?."
   [{:keys [source-catalog sink-catalog selected capacity]}]
   (let [free (:free capacity)]
     (->> (vals source-catalog)
-         (sort-by (juxt :name :rel))
+         (sort-by (juxt :artist :album :title :rel))
          (mapv (fn [t]
                  (let [k   (:key t)
                        on? (contains? selected k)]
-                   {:key     k
-                    :label   (fmt/track-row-label t (get sink-catalog k))
-                    :on?     on?
-                    :disable (and (not on?)
-                                  (not (cap/row-fits? k (:size t) selected sink-catalog free)))}))))))
+                   {:key      k
+                    :artist   (:artist t)
+                    :album    (:album t)
+                    :title    (:title t)
+                    :size     (:size t)
+                    :sink-rel (:rel (get sink-catalog k))
+                    :on?      on?
+                    :disable  (and (not on?)
+                                   (not (cap/row-fits? k (:size t) selected sink-catalog free)))}))))))
 
-(defn- track-list
-  "The source-track picker as a virtualized ListView: JavaFX realizes only the
-  cells currently scrolled into view (a few dozen), not one node per track, so a
-  multi-thousand-track library scrolls and toggles smoothly. Each cell is a
-  checkbox; toggling it dispatches ::toggle-track."
+(defn- check-column
+  "Leading selection column: a fixed-width checkbox per row, disabled when adding
+  the track would overflow the sink (see track-rows). Toggling dispatches
+  ::toggle-track. Carries the whole row as its cell value (identity factory); a
+  recycled cell can transiently describe a nil row, which renders blank."
+  []
+  {:fx/type            :table-column
+   :text               ""
+   :sortable           false
+   :resizable          false
+   :pref-width         36
+   :cell-value-factory identity
+   :cell-factory       {:fx/cell-type :table-cell
+                        :describe (fn [row]
+                                    (if row
+                                      {:graphic {:fx/type  :check-box
+                                                 :selected (boolean (:on? row))
+                                                 :disable  (boolean (:disable row))
+                                                 :on-selected-changed
+                                                 {:event/type ::events/toggle-track :key (:key row)}}}
+                                      {}))}})
+
+(defn- text-column [text key width]
+  {:fx/type :table-column :text text :pref-width width :cell-value-factory key})
+
+(defn- size-column []
+  {:fx/type            :table-column
+   :text               "Size"
+   :pref-width         90
+   ;; Cell value is the raw byte count so the column sorts numerically; the cell
+   ;; renders it human-readably (and a nil/empty cell stays blank).
+   :cell-value-factory :size
+   :cell-factory       {:fx/cell-type :table-cell
+                        :describe (fn [size]
+                                    {:text (when (some? size) (fmt/human-bytes size))})}})
+
+(defn- track-table
+  "The source-track picker as a virtualized TableView: JavaFX realizes only the
+  rows currently scrolled into view, not one node per track, so a multi-thousand
+  -track library scrolls and sorts smoothly. A leading checkbox column drives
+  selection; the remaining columns show the track's tags, size, and where it
+  currently lives on the sink."
   [state]
-  {:fx/type      :list-view
-   :v-box/vgrow  :always
-   :items        (track-items state)
-   :cell-factory {:fx/cell-type :list-cell
-                  :describe (fn [{:keys [key label on? disable]}]
-                              {:graphic {:fx/type  :check-box
-                                         :text     label
-                                         :selected on?
-                                         :disable  disable
-                                         :on-selected-changed {:event/type ::events/toggle-track :key key}}})}})
+  {:fx/type              :table-view
+   :v-box/vgrow          :always
+   :column-resize-policy :constrained
+   :items                (track-rows state)
+   :columns              [(check-column)
+                          (text-column "Artist" :artist 160)
+                          (text-column "Album" :album 160)
+                          (text-column "Title" :title 200)
+                          (size-column)
+                          (text-column "On sink" :sink-rel 160)]})
 
 (defn- progress-bar [progress]
   {:fx/type    :progress-bar
@@ -179,7 +221,7 @@
    :min-height 200
    :children   [(sync-bar libraries source-id sink-id)
                 (capacity-bar capacity)
-                (track-list state)
+                (track-table state)
                 (controls-row state status)
                 {:fx/type :label :text (fmt/plan-summary-text (:summary plan))}]})
 

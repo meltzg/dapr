@@ -16,6 +16,10 @@
   ;; also rely on --enable-native-access=ALL-UNNAMED (set in :run and :dev).
   ch.pontius.nio/smb-nio              {:mvn/version "0.13.0"}
   com.github.javakeyring/java-keyring {:mvn/version "1.0.4"}
+  ;; Audio tag reading (ID3/Vorbis/MP4/etc.) for the local file:// device. Reads
+  ;; from a java.io.File, so it only applies to the default filesystem provider —
+  ;; smb:// and mtp:// tracks fall back to path-derived tags (see dapr.device.tag).
+  net.jthink/jaudiotagger             {:mvn/version "3.0.1"}
   ;; cljfx pins an early-access JavaFX 22; exclude it so we control the JavaFX
   ;; version ourselves and avoid two JavaFX versions on the classpath.
   cljfx/cljfx           {:mvn/version "1.10.8"

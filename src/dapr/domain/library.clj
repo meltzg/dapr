@@ -4,7 +4,8 @@
   A *library* is {:id <string> :name <string> :roots [<uri-string> ...]} where
   each root addresses a directory on a java.nio filesystem; supported URI
   schemes are \"file\", \"mtp\" and \"smb\". A *track* is one audio file discovered under
-  a library's roots: {:key [filename size] :name :size :mtime :root :rel}. A
+  a library's roots: {:key [filename size] :name :size :mtime :root :rel} plus its
+  :artist/:album/:title tags (see dapr.device.tag). A
   *catalog* is a map of track :key -> track. Track identity is [rel size] — the
   path relative to its root, plus byte size, with the root deliberately excluded
   so the same relative path matches across roots/devices (e.g. source ROOT1/foo/

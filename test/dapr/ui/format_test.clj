@@ -38,12 +38,6 @@
     (is (true? (fmt/over-capacity? {:used 101 :budget 100})))
     (is (false? (fmt/over-capacity? {:used 100 :budget 100})))))
 
-(deftest track-row-label-test
-  (testing "shows name and size, plus sink location when present"
-    (is (= "song.mp3  (10 B)" (fmt/track-row-label {:name "song.mp3" :size 10} nil)))
-    (is (= "song.mp3  (10 B)  — on sink: A/song.mp3"
-           (fmt/track-row-label {:name "song.mp3" :size 10} {:rel "A/song.mp3"})))))
-
 (deftest plan-summary-text-test
   (testing "renders a populated summary"
     (is (= "Add 2 (2.0 KB) · Delete 1 (1.0 KB) · Skip 3"
