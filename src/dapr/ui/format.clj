@@ -1,7 +1,8 @@
 (ns dapr.ui.format
   "Pure presentation helpers for the UI: human-readable formatting and derived
   predicates over the application state. No side effects and no JavaFX, so this
-  logic is unit-testable in isolation (dapr.ui.views handles the rendering).")
+  logic is unit-testable in isolation (dapr.ui.views handles the rendering)."
+  (:require [clojure.string :as str]))
 
 (defn human-bytes
   "Format a byte count as a short human-readable string."
@@ -45,6 +46,43 @@
 (defn over-capacity?
   [{:keys [used budget]}]
   (boolean (and used budget (> used budget))))
+
+(defn- distinct-sorted
+  "Non-nil values of `xs`, distinct and sorted."
+  [xs]
+  (->> xs (remove nil?) distinct sort vec))
+
+(defn artists
+  "Sorted distinct artists present in `catalog` (a key->track map). Tracks with no
+  artist tag are omitted (they remain visible under the 'All' filter)."
+  [catalog]
+  (distinct-sorted (map :artist (vals catalog))))
+
+(defn albums
+  "Sorted distinct albums in `catalog`, restricted to `artist` when it is non-nil."
+  [catalog artist]
+  (distinct-sorted (->> (vals catalog)
+                        (filter (fn [t] (or (nil? artist) (= artist (:artist t)))))
+                        (map :album))))
+
+(defn search-filter
+  "The values of `xs` whose string form contains `q` (case-insensitive); all of
+  `xs` when `q` is blank. Used to narrow a column-browser facet list as the user
+  types."
+  [xs q]
+  (if (str/blank? q)
+    (vec xs)
+    (let [needle (str/lower-case q)]
+      (filterv #(str/includes? (str/lower-case (str %)) needle) xs))))
+
+(defn filter-catalog
+  "Subset of `catalog` whose tracks match `filter` {:artist :album}; a nil filter
+  field imposes no constraint on that field."
+  [catalog {:keys [artist album]}]
+  (into {} (filter (fn [[_ t]]
+                     (and (or (nil? artist) (= artist (:artist t)))
+                          (or (nil? album) (= album (:album t)))))
+                   catalog)))
 
 (defn plan-summary-text
   "Render a plan summary (see dapr.domain.plan/summary) as a one-liner."

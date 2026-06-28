@@ -18,6 +18,8 @@
    :source-catalog {}     ; key -> track
    :sink-catalog   {}     ; key -> track
    :selected       #{}    ; set of selected track keys
+   :filter         {:artist nil :album nil} ; iTunes-style column-browser filter (nil = All)
+   :filter-search  {:artist "" :album ""}   ; per-column search text narrowing the facet lists
    :free-bytes     0      ; usable bytes across the sink's distinct devices
    :capacity       {:used 0 :budget 0 :free 0}
    :plan           nil    ; {:actions [...] :summary {...}}
@@ -61,8 +63,31 @@
 (defn- recompute-capacity [{:keys [selected source-catalog sink-catalog free-bytes] :as state}]
   (assoc state :capacity (cap/usage selected source-catalog sink-catalog free-bytes)))
 
-(defn select-source [state id] (assoc state :source-id id))
+(defn select-source
+  "Choose the source library, clearing the column-browser filter and searches so
+  they start fresh for the new library's tags."
+  [state id]
+  (assoc state :source-id id
+         :filter {:artist nil :album nil}
+         :filter-search {:artist "" :album ""}))
+
 (defn select-sink [state id] (assoc state :sink-id id))
+
+(defn set-filter-artist
+  "Set the column-browser artist filter (nil = All), clearing the album filter
+  since the available albums change with the artist."
+  [state artist]
+  (assoc state :filter {:artist artist :album nil}))
+
+(defn set-filter-album
+  "Set the column-browser album filter (nil = All)."
+  [state album]
+  (assoc-in state [:filter :album] album))
+
+(defn set-filter-search
+  "Set the search text narrowing the facet list of column `col` (:artist/:album)."
+  [state col text]
+  (assoc-in state [:filter-search col] text))
 
 (defn set-catalogs
   "Record freshly scanned catalogs and free space, pre-select the tracks already

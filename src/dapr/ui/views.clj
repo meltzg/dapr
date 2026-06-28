@@ -106,9 +106,13 @@
                 {:fx/type :label :text "Sink"}
                 (library-combo ::events/select-sink (name-of sink-id) libraries)]}))
 
-(defn- capacity-bar [capacity]
+(defn- capacity-bar
+  "Capacity meter for the sink library `sink-name` (how full it would be after the
+  selected sync), so it's clear which library the bar is about."
+  [capacity sink-name]
   {:fx/type :h-box :spacing 8 :alignment :center-left
-   :children [{:fx/type :label :min-width 70 :text "Capacity"}
+   :children [{:fx/type :label :min-width 70
+               :text (if sink-name (str "Capacity — " sink-name) "Capacity")}
               {:fx/type :progress-bar :h-box/hgrow :always :max-width Double/MAX_VALUE
                :progress (fmt/capacity-fraction capacity)}
               {:fx/type :label :text (fmt/capacity-text capacity)
@@ -116,14 +120,16 @@
 
 (defn- track-rows
   "Resolve the source catalog into a sorted vector of row maps for the track
-  table, one per track: {:key :artist :album :title :size :sink-rel :on? :disable}.
-  Rows sort by artist/album/title (the table lets the user re-sort by any column).
-  Capacity is checked in constant time per row against the selection's remaining
-  free bytes (computed once from :capacity), so this stays O(n) even for libraries
-  of many thousands of tracks — see dapr.domain.capacity/row-fits?."
-  [{:keys [source-catalog sink-catalog selected capacity]}]
+  table, one per track: {:key :artist :album :title :size :sink-rel :on?
+  :disable}. Rows sort by artist/album/title (the table lets the user re-sort by
+  any column). Capacity is checked in constant time per row against the
+  selection's remaining free bytes (computed once from :capacity), so this stays
+  O(n) even for libraries of many thousands of tracks — see
+  dapr.domain.capacity/row-fits?. Only tracks matching the column-browser filter
+  are rowed (see filter-browser); selection/capacity still span the whole catalog."
+  [{:keys [source-catalog sink-catalog selected capacity filter]}]
   (let [free (:free capacity)]
-    (->> (vals source-catalog)
+    (->> (vals (fmt/filter-catalog source-catalog filter))
          (sort-by (juxt :artist :album :title :rel))
          (mapv (fn [t]
                  (let [k   (:key t)
@@ -141,8 +147,7 @@
 (defn- check-column
   "Leading selection column: a fixed-width checkbox per row, disabled when adding
   the track would overflow the sink (see track-rows). Toggling dispatches
-  ::toggle-track. Carries the whole row as its cell value (identity factory); a
-  recycled cell can transiently describe a nil row, which renders blank."
+  ::toggle-track. Carries the whole row as its cell value (identity factory)."
   []
   {:fx/type            :table-column
    :text               ""
@@ -151,6 +156,10 @@
    :pref-width         36
    :cell-value-factory identity
    :cell-factory       {:fx/cell-type :table-cell
+                        ;; A recycled cell can transiently describe a nil row
+                        ;; (empty=false, item=nil); return the blank {} description
+                        ;; for it — a nil :selected NPEs the check-box and a
+                        ;; {:graphic nil} makes cljfx try to create a nil component.
                         :describe (fn [row]
                                     (if row
                                       {:graphic {:fx/type  :check-box
@@ -168,11 +177,52 @@
    :text               "Size"
    :pref-width         90
    ;; Cell value is the raw byte count so the column sorts numerically; the cell
-   ;; renders it human-readably (and a nil/empty cell stays blank).
+   ;; itself renders it human-readably.
    :cell-value-factory :size
    :cell-factory       {:fx/cell-type :table-cell
+                        ;; Empty cells have a nil size — leave them blank rather
+                        ;; than rendering "0 B".
                         :describe (fn [size]
                                     {:text (when (some? size) (fmt/human-bytes size))})}})
+
+(defn- filter-column
+  "One column of the iTunes-style browser: a header (with a count), a search field
+  that narrows the list as you type, and a virtualized list whose first entry is
+  'All'. Selecting an entry dispatches `select-event` ('All' is normalized to nil
+  in the handler); typing dispatches `search-event`."
+  [title values search-text search-event select-event]
+  {:fx/type     :v-box
+   :h-box/hgrow :always
+   :spacing     2
+   :children    [{:fx/type :label :style "-fx-font-weight: bold;"
+                  :text (format "%s (%d)" title (count values))}
+                 {:fx/type         :text-field
+                  :text            search-text
+                  :prompt-text     (str "Filter " (str/lower-case title) "…")
+                  :on-text-changed {:event/type search-event}}
+                 {:fx/type     :list-view
+                  ;; Grow to fill the resizable browser section rather than a fixed
+                  ;; height, so dragging the divider gives the lists more room.
+                  :v-box/vgrow :always
+                  :items       (into ["All"] values)
+                  :on-selected-item-changed {:event/type select-event}}]})
+
+(defn- filter-browser
+  "iTunes-style column browser: an Artist column and an Album column scoped to the
+  selected artist, each with a search field narrowing its values. Selections
+  narrow the visible tracks via the :filter in state (see track-rows). Lives in
+  its own resizable split section above the table."
+  [{:keys [source-catalog filter filter-search]}]
+  (let [artists (fmt/search-filter (fmt/artists source-catalog) (:artist filter-search))
+        albums  (fmt/search-filter (fmt/albums source-catalog (:artist filter)) (:album filter-search))]
+    {:fx/type    :h-box
+     :spacing    8
+     ;; Floor so the browser can't be dragged shut entirely.
+     :min-height 80
+     :children   [(filter-column "Artist" artists (:artist filter-search)
+                                 ::events/filter-search-artist ::events/filter-artist)
+                  (filter-column "Album" albums (:album filter-search)
+                                 ::events/filter-search-album ::events/filter-album)]}))
 
 (defn- track-table
   "The source-track picker as a virtualized TableView: JavaFX realizes only the
@@ -182,7 +232,8 @@
   currently lives on the sink."
   [state]
   {:fx/type              :table-view
-   :v-box/vgrow          :always
+   ;; Floor so the table keeps usable height as the browser divider is dragged.
+   :min-height           120
    :column-resize-policy :constrained
    :items                (track-rows state)
    :columns              [(check-column)
@@ -201,15 +252,18 @@
                  0.0)})
 
 (defn- status-bar
-  "An always-visible strip pinned to the window bottom holding the scan/sync
-  progress bar, so it can never be clipped by the resizable split above it."
-  [progress]
+  "An always-visible strip pinned to the window bottom holding the status text and
+  scan/sync progress bar, so they can never be clipped by the resizable split
+  above them."
+  [progress status]
   {:fx/type   :h-box
    :padding   8
+   :spacing   8
    :alignment :center-left
-   :children  [(assoc (progress-bar progress) :h-box/hgrow :always)]})
+   :children  [{:fx/type :label :text (str "Status: " (fmt/status-text status))}
+               (assoc (progress-bar progress) :h-box/hgrow :always)]})
 
-(defn- controls-row [state status]
+(defn- controls-row [state]
   {:fx/type   :h-box
    :spacing   8
    :alignment :center-left
@@ -218,14 +272,13 @@
                 :on-action {:event/type ::events/preview}}
                {:fx/type :button :text "Sync"
                 :disable (not (fmt/can-sync? state))
-                :on-action {:event/type ::events/sync}}
-               {:fx/type :label :text (str "Status: " (fmt/status-text status))}]})
+                :on-action {:event/type ::events/sync}}]})
 
 (defn- sync-pane
   "Top section of the workspace: the source/sink pickers, capacity meter, the
   track picker (which grows to fill the section), the action buttons and the plan
   summary."
-  [{:keys [libraries source-id sink-id capacity plan status] :as state}]
+  [{:keys [libraries source-id sink-id capacity plan] :as state}]
   {:fx/type    :v-box
    :spacing    10
    :padding    12
@@ -233,9 +286,17 @@
    ;; collapse it entirely.
    :min-height 200
    :children   [(sync-bar libraries source-id sink-id)
-                (capacity-bar capacity)
-                (track-table state)
-                (controls-row state status)
+                (capacity-bar capacity (some #(when (= (:id %) sink-id) (:name %)) libraries))
+                ;; The filter browser and the track table share a draggable
+                ;; vertical split, so growing the table never squeezes the browser
+                ;; shut (and vice versa).
+                {:fx/type           :split-pane
+                 :orientation       :vertical
+                 :v-box/vgrow       :always
+                 :divider-positions [0.35]
+                 :items             [(filter-browser state)
+                                     (track-table state)]}
+                (controls-row state)
                 {:fx/type :label :text (fmt/plan-summary-text (:summary plan))}]})
 
 (defn- activity-pane
@@ -346,7 +407,7 @@
     {:fx/type :border-pane
      :top     (menu-bar)
      :center  (workspace state)
-     :bottom  (status-bar (:progress state))}}})
+     :bottom  (status-bar (:progress state) (:status state))}}})
 
 (defn root-view
   "Render the whole application: the main window plus the (modal) settings

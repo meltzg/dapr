@@ -24,6 +24,12 @@
   [state-atom conn]
   (swap! state-atom state/set-libraries (cache/libraries (d/db conn))))
 
+(defn- filter-value
+  "Normalize a column-browser selection to a filter value: the list's 'All' entry
+  and a cleared selection (nil) both mean no constraint."
+  [v]
+  (when (and v (not= "All" v)) v))
+
 (defn- error-summary
   "A short one-line description of `t` for the status/error field — its message, or
   its class name when it has none (e.g. a StackOverflowError)."
@@ -326,6 +332,13 @@
                                  (library-id-by-name state-atom (:fx/event event)))
                           (future (reload-catalogs! state-atom cache)))
       ::toggle-track  (swap! state-atom state/toggle-track (:key event))
+
+      ;; column-browser filter — the list's "All" entry (and a cleared selection)
+      ;; both mean no constraint (nil).
+      ::filter-artist (swap! state-atom state/set-filter-artist (filter-value (:fx/event event)))
+      ::filter-album  (swap! state-atom state/set-filter-album (filter-value (:fx/event event)))
+      ::filter-search-artist (swap! state-atom state/set-filter-search :artist (:fx/event event))
+      ::filter-search-album  (swap! state-atom state/set-filter-search :album (:fx/event event))
       ::preview       (future (run-preview! state-atom))
       ::sync          (future (run-sync! state-atom cache))
       ::quit          (do (Platform/exit) (System/exit 0))
