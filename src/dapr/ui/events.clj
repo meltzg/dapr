@@ -143,9 +143,12 @@
         src (state/library-by-id s (:source-id s))
         snk (state/library-by-id s (:sink-id s))]
     (when (and src snk)
-      (load-cached-catalogs! state-atom conn src snk)
+      ;; Bump the scan generation *before* painting from the cache, so any scan
+      ;; still in flight from an earlier selection is superseded and can't swap its
+      ;; now-stale catalogs in after this refresh has started.
       (let [superseded? (begin-scan! state-atom)
             prog        (begin-progress! state-atom)]
+        (load-cached-catalogs! state-atom conn src snk)
         (swap! state-atom state/set-status :scanning)
         (try
           ;; Scan source and sink concurrently — melt-jfs serializes per device, so

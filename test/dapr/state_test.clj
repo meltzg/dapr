@@ -5,6 +5,20 @@
 (def lib-a {:id "a" :name "A" :roots ["file:///a"]})
 (def lib-b {:id "b" :name "B" :roots ["file:///b"]})
 
+(deftest select-invalidates-plan-test
+  (testing "changing the source drops a plan built for the previous pair"
+    (let [s (-> state/initial-state
+                (assoc :plan {:actions [] :summary {}} :status :planned)
+                (state/select-source "x"))]
+      (is (nil? (:plan s)))
+      (is (= :idle (:status s)))))
+  (testing "changing the sink drops a plan built for the previous pair"
+    (let [s (-> state/initial-state
+                (assoc :plan {:actions [] :summary {}} :status :planned)
+                (state/select-sink "y"))]
+      (is (nil? (:plan s)))
+      (is (= :idle (:status s))))))
+
 (deftest filter-test
   (testing "selecting a source clears the column-browser filter"
     (let [s (-> state/initial-state
