@@ -18,6 +18,16 @@
 
 ;; --- library manager ---------------------------------------------------------
 
+(defn- default-toggle
+  "A toggle marking library `l` as the default `role` (:source/:sink) on launch.
+  Reflects the persisted flag and dispatches ::library-default to flip it."
+  [l role on? tooltip]
+  {:fx/type   :toggle-button
+   :text      (name role)
+   :selected  on?
+   :tooltip   {:fx/type :tooltip :text tooltip}
+   :on-action {:event/type ::events/library-default :role role :id (:id l)}})
+
 (defn- library-list [libraries]
   {:fx/type :v-box
    :spacing 4
@@ -28,8 +38,11 @@
                        :items (mapv device-views/library-menu-item device-format/types)}]}]
          (for [l libraries]
            {:fx/type :h-box :spacing 8 :alignment :center-left
-            :children [{:fx/type :label :min-width 200
+            :children [{:fx/type :label :min-width 180
                         :text (format "%s  (%d dirs)" (:name l) (count (:roots l)))}
+                       {:fx/type :label :text "Default:"}
+                       (default-toggle l :source (:default-source? l) "Pre-select as the sync source on launch")
+                       (default-toggle l :sink (:default-sink? l) "Pre-select as the sync sink on launch")
                        {:fx/type :button :text "Edit"
                         :on-action {:event/type ::events/library-edit :id (:id l)}}
                        {:fx/type :button :text "Delete"

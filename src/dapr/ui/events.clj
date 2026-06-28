@@ -231,6 +231,15 @@
                                       (state/append-log (str "Sync failed: " (error-summary t)))
                                       (state/append-log (error-detail t)))))))))
 
+(defn start!
+  "Once the UI is mounted, kick off the initial catalog load for any persisted
+  default source/sink (pre-selected at state init), so a launch with defaults
+  lands ready to sync."
+  [state-atom cache]
+  (let [{:keys [source-id sink-id]} @state-atom]
+    (when (and source-id sink-id)
+      (future (reload-catalogs! state-atom cache)))))
+
 (def ^:private mixed-device-msg
   "A library's roots must all live on one device — remove the existing roots first to switch device.")
 
@@ -260,6 +269,11 @@
                            (cache/snapshot! conn (:path cache))
                            (swap! state-atom state/delete-library (:id event))
                            (refresh-libraries! state-atom conn))
+      ;; Mark/clear a library as the default source or sink (applied at next
+      ;; launch, see start!). The current session's selection is left as-is.
+      ::library-default (do (cache/set-default! conn (:role event) (:id event))
+                            (cache/snapshot! conn (:path cache))
+                            (refresh-libraries! state-atom conn))
 
       ;; editor
       ::editor-name        (swap! state-atom state/editor-name (:fx/event event))

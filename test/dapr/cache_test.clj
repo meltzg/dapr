@@ -17,19 +17,53 @@
       (is (not= a b))
       (is (= [{:id a :name "A" :roots ["file:///a/"]}
               {:id b :name "B" :roots ["file:///b/"]}]
-             (cache/libraries (d/db conn)))))
+             (map #(select-keys % [:id :name :roots]) (cache/libraries (d/db conn))))))
 
     (testing "upsert with an existing id updates in place"
       (cache/upsert-library! conn {:id a :name "A2" :roots ["file:///a/" "file:///a2/"]})
       (is (= {:id a :name "A2" :roots ["file:///a/" "file:///a2/"]}
-             (first (cache/libraries (d/db conn))))))
+             (select-keys (first (cache/libraries (d/db conn))) [:id :name :roots]))))
 
     (testing "delete removes the library and its presences"
       (cache/replace-library-tracks! conn a [(track "x/y.mp3" 10)])
       (is (seq (cache/track-libraries (d/db conn) "x/y.mp3" 10)))
       (cache/delete-library! conn a)
-      (is (= [{:id b :name "B" :roots ["file:///b/"]}] (cache/libraries (d/db conn))))
+      (is (= [{:id b :name "B" :roots ["file:///b/"]}]
+             (map #(select-keys % [:id :name :roots]) (cache/libraries (d/db conn)))))
       (is (empty? (cache/track-libraries (d/db conn) "x/y.mp3" 10))))))
+
+(deftest default-library-test
+  (let [conn (cache/empty-conn)
+        a    (cache/upsert-library! conn {:name "A" :roots ["file:///a/"]})
+        b    (cache/upsert-library! conn {:name "B" :roots ["file:///b/"]})]
+    (testing "no defaults to start"
+      (is (nil? (cache/default-library (d/db conn) :source)))
+      (is (nil? (cache/default-library (d/db conn) :sink)))
+      (is (= [false false] [(:default-source? (first (cache/libraries (d/db conn))))
+                            (:default-sink? (first (cache/libraries (d/db conn))))])))
+
+    (testing "source and sink defaults are independent"
+      (cache/set-default! conn :source a)
+      (cache/set-default! conn :sink b)
+      (is (= a (cache/default-library (d/db conn) :source)))
+      (is (= b (cache/default-library (d/db conn) :sink)))
+      (let [by-id (into {} (map (juxt :id identity)) (cache/libraries (d/db conn)))]
+        (is (true? (:default-source? (by-id a))))
+        (is (true? (:default-sink? (by-id b))))))
+
+    (testing "setting a role's default moves it off the previous holder"
+      (cache/set-default! conn :source b)
+      (is (= b (cache/default-library (d/db conn) :source)))
+      (is (false? (:default-source? (first (filter #(= a (:id %)) (cache/libraries (d/db conn))))))))
+
+    (testing "re-setting the current default toggles it off"
+      (cache/set-default! conn :source b)
+      (is (nil? (cache/default-library (d/db conn) :source))))
+
+    (testing "deleting a library clears any default it held"
+      (cache/set-default! conn :sink b)
+      (cache/delete-library! conn b)
+      (is (nil? (cache/default-library (d/db conn) :sink))))))
 
 (deftest replace-library-tracks-test
   (let [conn (cache/empty-conn)

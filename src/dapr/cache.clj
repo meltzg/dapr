@@ -90,17 +90,41 @@
 ;; --- libraries ---------------------------------------------------------------
 
 (defn libraries
-  "All libraries as UI projection maps {:id :name :roots}, in creation order
-  (ascending entity id). :id is the DataScript entity id."
+  "All libraries as UI projection maps {:id :name :roots :default-source?
+  :default-sink?}, in creation order (ascending entity id). :id is the DataScript
+  entity id."
   [db]
-  (->> (d/q '[:find [(pull ?e [:db/id :library/name :library/roots]) ...]
+  (->> (d/q '[:find [(pull ?e [:db/id :library/name :library/roots
+                               :library/default-source? :library/default-sink?]) ...]
               :where [?e :library/name]]
             db)
-       (map (fn [m] {:id    (:db/id m)
-                     :name  (:library/name m)
-                     :roots (vec (:library/roots m))}))
+       (map (fn [m] {:id              (:db/id m)
+                     :name            (:library/name m)
+                     :roots           (vec (:library/roots m))
+                     :default-source? (boolean (:library/default-source? m))
+                     :default-sink?   (boolean (:library/default-sink? m))}))
        (sort-by :id)
        (vec)))
+
+(def ^:private default-attr
+  "Boolean attribute marking a library as the default for a sync role."
+  {:source :library/default-source? :sink :library/default-sink?})
+
+(defn default-library
+  "Entity id of the default library for `role` (:source or :sink), or nil."
+  [db role]
+  (d/q '[:find ?e . :in $ ?attr :where [?e ?attr true]] db (default-attr role)))
+
+(defn set-default!
+  "Make `lib-eid` the sole default library for `role` (:source or :sink). Clears
+  the flag from whichever library currently holds it; if that is `lib-eid` itself,
+  the default is simply cleared (toggle off)."
+  [conn role lib-eid]
+  (let [attr    (default-attr role)
+        current (default-library (d/db conn) role)]
+    (d/transact! conn (cond-> []
+                        current                 (conj [:db/retract current attr true])
+                        (not= current lib-eid)  (conj [:db/add lib-eid attr true])))))
 
 (defn upsert-library!
   "Create or update a library from {:id <eid|nil> :name :roots}. Returns its
