@@ -23,14 +23,17 @@
   (.getTag (AudioFileIO/read (.toFile path))))
 
 (defmethod tag/tags! :file [track ^Path path]
-  (let [fallback (tags/from-path track)]
+  (let [fallback (assoc (tags/from-path track) :source :path)]
     (try
       (if-let [tg (read-tag path)]
+        ;; The file has a real tag: :embedded, even where individual fields fall
+        ;; back to the path (a blank embedded field).
         (let [pick (fn [^FieldKey k fb]
                      (let [v (.getFirst tg k)] (if (str/blank? v) fb v)))]
           {:artist (pick FieldKey/ARTIST (:artist fallback))
            :album  (pick FieldKey/ALBUM (:album fallback))
-           :title  (pick FieldKey/TITLE (:title fallback))})
+           :title  (pick FieldKey/TITLE (:title fallback))
+           :source :embedded})
         fallback)
       ;; Throwable, not Exception: jaudiotagger can throw Errors (e.g. a
       ;; StackOverflowError on a malformed/deeply-nested tag) which would

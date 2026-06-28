@@ -5,9 +5,9 @@
   (:import (java.nio.file Files)
            (java.nio.file.attribute FileAttribute)))
 
-(defn- track [rel size & {:keys [artist album title root mtime]}]
+(defn- track [rel size & {:keys [artist album title root mtime source]}]
   {:rel rel :size size :artist artist :album album :title title
-   :root (or root "file:///r/") :mtime mtime})
+   :root (or root "file:///r/") :mtime mtime :source source})
 
 (deftest library-crud-test
   (let [conn (cache/empty-conn)
@@ -75,7 +75,8 @@
       (let [cat (cache/library-catalog (d/db conn) a)]
         (is (= #{["Artist/Album/One.mp3" 10] ["Two.flac" 20]} (set (keys cat))))
         (is (= {:key   ["Artist/Album/One.mp3" 10] :rel "Artist/Album/One.mp3" :size 10
-                :root  "file:///r/" :mtime 111 :artist "Artist" :album "Album" :title "One"}
+                :root  "file:///r/" :mtime 111 :artist "Artist" :album "Album" :title "One"
+                :source nil}
                (get cat ["Artist/Album/One.mp3" 10])))
         (is (nil? (:artist (get cat ["Two.flac" 20]))))))
 
@@ -98,6 +99,30 @@
       (cache/replace-library-tracks! conn lib tracks)
       (cache/replace-library-tracks! conn lib tracks)
       (is (= 4000 (count (cache/library-catalog (d/db conn) lib)))))))
+
+(deftest tag-source-preference-test
+  (let [conn (cache/empty-conn)
+        a    (cache/upsert-library! conn {:name "A" :roots ["file:///a/"]})
+        b    (cache/upsert-library! conn {:name "B" :roots ["smb://h/s/"]})]
+    ;; Library A holds the track with real embedded tags.
+    (cache/replace-library-tracks! conn a [(track "x.mp3" 1 :artist "Real" :source :embedded)])
+    ;; Library B (a path-only device) holds the same [rel size] with inferred tags.
+    (cache/replace-library-tracks! conn b [(track "x.mp3" 1 :artist "Path" :source :path
+                                                  :root "smb://h/s/")])
+    (testing "a path-derived scan records its presence but does not downgrade embedded tags"
+      (let [ca (get (cache/library-catalog (d/db conn) a) ["x.mp3" 1])]
+        (is (= "Real" (:artist ca)))
+        (is (= :embedded (:source ca))))
+      (is (= #{a b} (set (cache/track-libraries (d/db conn) "x.mp3" 1)))))
+
+    (testing "a later embedded scan still updates the tags"
+      (cache/replace-library-tracks! conn a [(track "x.mp3" 1 :artist "Real2" :source :embedded)])
+      (is (= "Real2" (:artist (get (cache/library-catalog (d/db conn) a) ["x.mp3" 1])))))
+
+    (testing "path tags still fill in a track that has none yet"
+      (cache/replace-library-tracks! conn b [(track "y.mp3" 2 :artist "PathY" :source :path
+                                                    :root "smb://h/s/")])
+      (is (= "PathY" (:artist (get (cache/library-catalog (d/db conn) b) ["y.mp3" 2])))))))
 
 (deftest incremental-replace-test
   (let [conn (cache/empty-conn)

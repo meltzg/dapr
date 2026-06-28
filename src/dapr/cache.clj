@@ -159,20 +159,22 @@
 
 (defn library-catalog
   "key -> track map for library `lib-eid`, in the shape the planner and table
-  expect: {:key [rel size] :rel :size :root :mtime :artist :album :title}. Missing
-  tags/mtime come back as nil."
+  expect: {:key [rel size] :rel :size :root :mtime :artist :album :title :source}.
+  :source is :embedded / :path (how the tags were obtained). Missing tags/mtime
+  come back as nil."
   [db lib-eid]
   (->> (d/q '[:find [(pull ?p [:presence/root :presence/mtime
-                               {:presence/track [:track/rel :track/size
+                               {:presence/track [:track/rel :track/size :track/tag-source
                                                  :track/artist :track/album :track/title]}]) ...]
               :in $ ?lib
               :where [?p :presence/library ?lib]]
             db lib-eid)
        (reduce (fn [acc {:keys [presence/root presence/mtime presence/track]}]
-                 (let [{:keys [track/rel track/size track/artist track/album track/title]} track]
+                 (let [{:keys [track/rel track/size track/artist track/album track/title
+                               track/tag-source]} track]
                    (assoc acc [rel size]
                           {:key   [rel size] :rel rel :size size :root root :mtime mtime
-                           :artist artist :album album :title title})))
+                           :artist artist :album album :title title :source tag-source})))
                {})))
 
 (defn track-libraries
@@ -187,13 +189,17 @@
 
 (defn- track-tx
   "tx-data upserting `track` (by its [rel size] identity) and a presence linking
-  it to library `lib-eid`. Nil tags are omitted (DataScript rejects nil values)."
-  [lib-eid {:keys [rel size artist album title root mtime]}]
+  it to library `lib-eid`. The presence (root/mtime) is always written; the track
+  entity's tags are written only when `write-tags?` (so a path-derived scan can be
+  recorded as a presence without downgrading a track's existing embedded tags —
+  see replace-library-tracks!). Nil values are omitted (DataScript rejects them)."
+  [lib-eid write-tags? {:keys [rel size artist album title source root mtime]}]
   (let [tid (str "track-" rel "-" size)]
     [(cond-> {:db/id tid :track/rel rel :track/size size}
-       artist (assoc :track/artist artist)
-       album  (assoc :track/album album)
-       title  (assoc :track/title title))
+       (and write-tags? artist) (assoc :track/artist artist)
+       (and write-tags? album)  (assoc :track/album album)
+       (and write-tags? title)  (assoc :track/title title)
+       (and write-tags? source) (assoc :track/tag-source source))
      (cond-> {:presence/library lib-eid :presence/track tid :presence/root root}
        mtime (assoc :presence/mtime mtime))]))
 
@@ -205,49 +211,82 @@
   that recursion bounded (~2x this, for the track + its presence)."
   256)
 
-(defn- track-changed?
-  "True when scanned track `t` differs from its `cached` counterpart (same [rel
-  size]) in anything the cache stores — its tags, the root it lives under, or its
-  mtime — so an unchanged track needn't be re-transacted."
-  [cached t]
-  (or (not= (:mtime cached) (:mtime t))
-      (not= (:root cached) (:root t))
-      (not= (:artist cached) (:artist t))
-      (not= (:album cached) (:album t))
-      (not= (:title cached) (:title t))))
+(defn- track-sources
+  "Map of [rel size] -> :track/tag-source for every track currently in the DB.
+  Used across libraries (the track entity is shared) to avoid downgrading a
+  track's embedded tags to path-derived ones."
+  [db]
+  (reduce (fn [m [rel size src]] (assoc m [rel size] src))
+          {}
+          (d/q '[:find ?rel ?size ?src
+                 :where [?t :track/rel ?rel] [?t :track/size ?size]
+                 [?t :track/tag-source ?src]]
+               db)))
+
+(defn- downgrade?
+  "True when writing scanned track `t`'s tags would replace existing embedded tags
+  (`existing-src` :embedded) with path-derived ones (t's :source :path)."
+  [existing-src t]
+  (and (= :path (:source t)) (= :embedded existing-src)))
+
+(defn- needs-upsert?
+  "Whether scanned track `t` requires a transaction: it's new to this library, its
+  presence (root/mtime) changed, or its tags/source changed in a way we'll write
+  (a pure embedded->path downgrade is skipped, since it leaves the cache as-is)."
+  [cached existing-src t]
+  (cond
+    (nil? cached) true
+    (or (not= (:root cached) (:root t))
+        (not= (:mtime cached) (:mtime t))) true
+    (downgrade? existing-src t) false
+    :else (or (not= (:source cached) (:source t))
+              (not= (:artist cached) (:artist t))
+              (not= (:album cached) (:album t))
+              (not= (:title cached) (:title t)))))
 
 (defn replace-library-tracks!
   "Set library `lib-eid`'s presences to exactly `tracks` (catalog track maps).
   Diffs against the library's current cached catalog (`cached`, key -> track —
   queried when not supplied) and only transacts the delta: retract presences whose
-  track is gone, and upsert tracks that are new or changed (see track-changed?).
-  An unchanged re-scan therefore transacts nothing. Upserts are batched so a large
-  change set can't overflow DataScript's per-upsert recursion (see tx-batch-size)."
+  track is gone, and upsert tracks that are new or changed (see needs-upsert?). An
+  unchanged re-scan therefore transacts nothing. A track's existing embedded tags
+  are never overwritten by a path-derived scan (the presence is still recorded);
+  see downgrade?. Upserts are batched so a large change set can't overflow
+  DataScript's per-upsert recursion (see tx-batch-size)."
   ([conn lib-eid tracks]
    (replace-library-tracks! conn lib-eid tracks (library-catalog (d/db conn) lib-eid)))
   ([conn lib-eid tracks cached]
-   (let [want     (set (map (juxt :rel :size) tracks))
+   (let [db       (d/db conn)
+         want     (set (map (juxt :rel :size) tracks))
+         src-of   (track-sources db)
          existing (d/q '[:find ?p ?rel ?size :in $ ?lib
                          :where [?p :presence/library ?lib]
                          [?p :presence/track ?t]
                          [?t :track/rel ?rel] [?t :track/size ?size]]
-                       (d/db conn) lib-eid)
+                       db lib-eid)
          retract  (vec (for [[p rel size] existing
                              :when (not (want [rel size]))]
                          [:db/retractEntity p]))
-         changed  (filter (fn [t]
-                            (let [c (cached [(:rel t) (:size t)])]
-                              (or (nil? c) (track-changed? c t))))
+         upserts  (filter (fn [t]
+                            (needs-upsert? (cached [(:rel t) (:size t)])
+                                           (src-of [(:rel t) (:size t)]) t))
                           tracks)]
      (when (seq retract)
        (d/transact! conn retract))
-     (doseq [batch (partition-all tx-batch-size changed)]
-       (d/transact! conn (into [] (mapcat #(track-tx lib-eid %)) batch))))))
+     (doseq [batch (partition-all tx-batch-size upserts)]
+       (d/transact! conn (into []
+                               (mapcat (fn [t]
+                                         (track-tx lib-eid
+                                                   (not (downgrade? (src-of [(:rel t) (:size t)]) t))
+                                                   t)))
+                               batch))))))
 
 (defn add-presence!
-  "Record that `track` is now on library `lib-eid` (used after a sync add)."
+  "Record that `track` is now on library `lib-eid` (used after a sync add). The
+  track entity already exists (it is the source track being copied), so writing its
+  tags is idempotent."
   [conn lib-eid track]
-  (d/transact! conn (track-tx lib-eid track)))
+  (d/transact! conn (track-tx lib-eid true track)))
 
 (defn remove-presence!
   "Drop the presence of track [rel size] on library `lib-eid` (used after a sync

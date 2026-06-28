@@ -41,14 +41,16 @@
             (map-indexed vector segs))))
 
 (defn- track-tags!
-  "Artist/album/title for the audio file at `p` described by `m`. Reuses tags from
-  the `known` lookup (rel size -> cached track) when it has an entry for this
-  [rel size] with the same mtime — so an unchanged file is not re-read, which is
-  the expensive part over MTP/SMB; otherwise reads them via the device tag reader."
+  "Artist/album/title/source for the audio file at `p` described by `m`. Reuses
+  tags from the `known` lookup (rel size -> cached track) when it has an entry for
+  this [rel size] with the same mtime *and a recorded :source* — so an unchanged
+  file is not re-read, which is the expensive part over MTP/SMB. A cached entry
+  without a :source predates source tracking, so it is re-read to record one
+  (letting embedded tags be preferred over path-derived — see dapr.cache)."
   [known {:keys [rel size mtime] :as m} ^Path p]
   (let [cached (when known (known rel size))]
-    (if (and cached (= mtime (:mtime cached)))
-      (select-keys cached [:artist :album :title])
+    (if (and cached (:source cached) (= mtime (:mtime cached)))
+      (select-keys cached [:artist :album :title :source])
       (device-tag/tags! m p))))
 
 (defn- audio-track
