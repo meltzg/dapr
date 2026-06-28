@@ -38,6 +38,28 @@
     (is (true? (fmt/over-capacity? {:used 101 :budget 100})))
     (is (false? (fmt/over-capacity? {:used 100 :budget 100})))))
 
+(deftest column-browser-facets-test
+  (let [cat {["a" 1] {:key ["a" 1] :artist "Alice" :album "One"   :title "x"}
+             ["b" 2] {:key ["b" 2] :artist "Alice" :album "Two"   :title "y"}
+             ["c" 3] {:key ["c" 3] :artist "Bob"   :album "Three" :title "z"}
+             ["d" 4] {:key ["d" 4] :artist nil     :album nil     :title "n"}}]
+    (testing "artists are distinct and sorted, with nil omitted"
+      (is (= ["Alice" "Bob"] (fmt/artists cat))))
+    (testing "albums span the catalog when artist is nil, else scope to the artist"
+      (is (= ["One" "Three" "Two"] (fmt/albums cat nil)))
+      (is (= ["One" "Two"] (fmt/albums cat "Alice")))
+      (is (= ["Three"] (fmt/albums cat "Bob"))))
+    (testing "search-filter narrows facet values case-insensitively; blank keeps all"
+      (is (= ["Alice" "Bob"] (fmt/search-filter (fmt/artists cat) "")))
+      (is (= ["Alice" "Bob"] (fmt/search-filter (fmt/artists cat) "   ")))
+      (is (= ["Alice"] (fmt/search-filter (fmt/artists cat) "ali")))
+      (is (= ["Bob"] (fmt/search-filter (fmt/artists cat) "B")))
+      (is (= [] (fmt/search-filter (fmt/artists cat) "zzz"))))
+    (testing "filter-catalog constrains by artist and album; a nil field is unconstrained"
+      (is (= 4 (count (fmt/filter-catalog cat {:artist nil :album nil}))))
+      (is (= #{["a" 1] ["b" 2]} (set (keys (fmt/filter-catalog cat {:artist "Alice" :album nil})))))
+      (is (= #{["a" 1]} (set (keys (fmt/filter-catalog cat {:artist "Alice" :album "One"}))))))))
+
 (deftest plan-summary-text-test
   (testing "renders a populated summary"
     (is (= "Add 2 (2.0 KB) · Delete 1 (1.0 KB) · Skip 3"

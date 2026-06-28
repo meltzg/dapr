@@ -5,6 +5,31 @@
 (def lib-a {:id "a" :name "A" :roots ["file:///a"]})
 (def lib-b {:id "b" :name "B" :roots ["file:///b"]})
 
+(deftest filter-test
+  (testing "selecting a source clears the column-browser filter"
+    (let [s (-> state/initial-state
+                (assoc :filter {:artist "X" :album "Y"})
+                (state/select-source "id"))]
+      (is (= {:artist nil :album nil} (:filter s)))))
+  (testing "setting an artist clears the album (its albums change)"
+    (let [s (-> state/initial-state
+                (assoc-in [:filter :album] "Old")
+                (state/set-filter-artist "A"))]
+      (is (= {:artist "A" :album nil} (:filter s)))))
+  (testing "setting an album keeps the artist"
+    (let [s (-> state/initial-state (state/set-filter-artist "A") (state/set-filter-album "B"))]
+      (is (= {:artist "A" :album "B"} (:filter s)))))
+  (testing "set-filter-search sets a column's search text"
+    (let [s (-> state/initial-state
+                (state/set-filter-search :artist "be")
+                (state/set-filter-search :album "ok"))]
+      (is (= {:artist "be" :album "ok"} (:filter-search s)))))
+  (testing "selecting a source also clears the facet searches"
+    (let [s (-> state/initial-state
+                (state/set-filter-search :artist "be")
+                (state/select-source "id"))]
+      (is (= {:artist "" :album ""} (:filter-search s))))))
+
 (deftest libraries-test
   (testing "set, upsert (insert then replace), and lookup"
     (let [s (state/set-libraries state/initial-state [lib-a])]
