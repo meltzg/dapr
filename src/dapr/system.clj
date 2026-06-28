@@ -36,8 +36,14 @@
     (cache/snapshot! conn path)))
 
 (defmethod ig/init-key :dapr/state [_ {:keys [cache]}]
-  (atom (-> state/initial-state
-            (state/set-libraries (cache/libraries (d/db (:conn cache)))))))
+  (let [db (d/db (:conn cache))]
+    (atom (-> state/initial-state
+              (state/set-libraries (cache/libraries db))
+              ;; Pre-select the persisted default source/sink so a launch lands
+              ;; ready to sync (their catalogs are loaded by the renderer once it
+              ;; mounts — see events/start!).
+              (assoc :source-id (cache/default-library db :source)
+                     :sink-id   (cache/default-library db :sink))))))
 
 (defmethod ig/halt-key! :dapr/state [_ state-atom]
   (reset! state-atom state/initial-state))
@@ -48,6 +54,8 @@
                   :middleware (fx/wrap-map-desc (fn [s] (views/root-view s)))
                   :opts {:fx.opt/map-event-handler handler})]
     (fx/mount-renderer state-atom renderer)
+    ;; Kick off the initial catalog load for any persisted default source/sink.
+    (events/start! state-atom cache)
     {:renderer renderer :state-atom state-atom}))
 
 (defmethod ig/halt-key! :dapr/renderer [_ {:keys [renderer state-atom]}]
